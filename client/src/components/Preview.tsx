@@ -53,6 +53,8 @@ interface ConnectionDragState {
   anchorY: number;
   currentX: number;
   currentY: number;
+  startClientX: number;
+  startClientY: number;
   hoveredNodeId: string | null;
 }
 
@@ -145,6 +147,8 @@ export const Preview: React.FC<PreviewProps> = ({
   const [knownNodes, setKnownNodes] = useState<string[]>([]);
 
   const [selectedEl, setSelectedEl] = useState<SelectedDiagramElement | null>(null);
+  const [linkingFromNodeId, setLinkingFromNodeId] = useState<string | null>(null);
+  const [connectTargetNodeId, setConnectTargetNodeId] = useState<string>('');
   const [editLabel, setEditLabel] = useState<string>('');
   const [editShape, setEditShape] = useState<NodeShape>('rect');
   const [connectLabel, setConnectLabel] = useState<string>('Next Step');
@@ -368,6 +372,84 @@ export const Preview: React.FC<PreviewProps> = ({
     svgEl.appendChild(overlayLayer);
   }, [svg, onChangeCode]);
 
+  // Keep SVG visual selection state (.mc-selected-node / .mc-linking-source) synced with selectedEl
+  useEffect(() => {
+    const svgEl = stageRef.current?.querySelector('svg');
+    if (!svgEl) return;
+    svgEl.querySelectorAll('g.node.mc-selected-node, g.node.mc-linking-source').forEach((el) => {
+      el.classList.remove('mc-selected-node', 'mc-linking-source');
+    });
+
+    if (selectedEl?.kind === 'node' && selectedEl.nodeId) {
+      const selNode = svgEl.querySelector(
+        `g.node[data-mc-node-id="${CSS.escape(selectedEl.nodeId)}"]`
+      );
+      if (selNode) {
+        selNode.classList.add('mc-selected-node');
+      }
+      // Keep default target node updated to first available other node
+      const otherNodes = knownNodes.filter((n) => n !== selectedEl.nodeId);
+      if (otherNodes.length > 0 && (!connectTargetNodeId || connectTargetNodeId === selectedEl.nodeId)) {
+        setConnectTargetNodeId(otherNodes[0]);
+      }
+    }
+
+    if (linkingFromNodeId) {
+      const linkNode = svgEl.querySelector(
+        `g.node[data-mc-node-id="${CSS.escape(linkingFromNodeId)}"]`
+      );
+      if (linkNode) {
+        linkNode.classList.add('mc-linking-source');
+      }
+    }
+  }, [svg, selectedEl, linkingFromNodeId, knownNodes, connectTargetNodeId]);
+
+  // Keyboard shortcuts: Delete / Backspace to delete selected node or connection, Escape to clear selection
+  useEffect(() => {
+    if (!selectedEl || !onChangeCode) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const active = document.activeElement as HTMLElement | null;
+      if (
+        active &&
+        (active.tagName === 'INPUT' ||
+          active.tagName === 'TEXTAREA' ||
+          active.tagName === 'SELECT' ||
+          active.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        if (linkingFromNodeId) {
+          setLinkingFromNodeId(null);
+        } else {
+          setSelectedEl(null);
+        }
+        return;
+      }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        if (selectedEl.kind === 'node') {
+          const nextCode = deleteNodeFromCode(code, selectedEl.nodeId);
+          onChangeCode(nextCode);
+          setSelectedEl(null);
+          setLinkingFromNodeId(null);
+        } else if (selectedEl.kind === 'edge' && selectedEl.fromId && selectedEl.toId) {
+          const nextCode = deleteEdgeInCode(code, selectedEl.fromId, selectedEl.toId);
+          onChangeCode(nextCode);
+          setSelectedEl(null);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [selectedEl, linkingFromNodeId, code, onChangeCode]);
+
   // Mouse wheel zooms in and out directly
   useEffect(() => {
     const el = canvasRef.current;
@@ -432,7 +514,7 @@ export const Preview: React.FC<PreviewProps> = ({
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const target = e.target as Element;
-    if (target.closest('.visual-node-editor')) return;
+    if (target.closest('.visual-node-editor, .floating-selection-bar')) return;
 
     const svgEl = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
 
@@ -456,6 +538,8 @@ export const Preview: React.FC<PreviewProps> = ({
         anchorY,
         currentX: handleX,
         currentY: handleY,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
         hoveredNodeId: null,
       };
       connDragRef.current = dragState;
@@ -487,6 +571,8 @@ export const Preview: React.FC<PreviewProps> = ({
           anchorY,
           currentX: pt.x,
           currentY: pt.y,
+          startClientX: e.clientX,
+          startClientY: e.clientY,
           hoveredNodeId: null,
         };
         connDragRef.current = dragState;
@@ -532,6 +618,51 @@ export const Preview: React.FC<PreviewProps> = ({
     });
   };
 
+  const selectOrLinkClickedElement = (target: Element) => {
+    if (!onChangeCode) return;
+    const info = extractSvgElementInfo(target, code, knownNodes);
+    if (info) {
+      // If user is in click-to-connect mode (or Connect Mode with a selected node) and clicked another node: connect them!
+      const activeSourceNodeId =
+        linkingFromNodeId ||
+        (connectMode && selectedEl?.kind === 'node' ? selectedEl.nodeId : null);
+
+      if (
+        info.kind === 'node' &&
+        activeSourceNodeId &&
+        info.nodeId !== activeSourceNodeId
+      ) {
+        const nextCode = connectNodesInCode(
+          code,
+          activeSourceNodeId,
+          info.nodeId,
+          connectEdgeType,
+          connectEdgeLabel
+        );
+        onChangeCode(nextCode);
+        setLinkingFromNodeId(null);
+        return;
+      }
+
+      setSelectedEl(info);
+      setEditLabel(info.label);
+      setEditShape(info.shape);
+      if (info.kind === 'edge' && info.edgeType) {
+        setConnectEdgeType(info.edgeType);
+      }
+      if (info.kind !== 'node') {
+        setLinkingFromNodeId(null);
+      }
+    } else if (
+      !target.closest(
+        'g.node, g.actor, g.edgeLabel, g.cluster, path[data-edge="true"], .mc-edge-hit'
+      )
+    ) {
+      setSelectedEl(null);
+      setLinkingFromNodeId(null);
+    }
+  };
+
   const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
     const activeConnDrag = connDragRef.current;
     if (activeConnDrag) {
@@ -541,15 +672,33 @@ export const Preview: React.FC<PreviewProps> = ({
       const svgEl = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
       if (!svgEl || !onChangeCode) return;
 
+      const clientDist = Math.hypot(
+        e.clientX - activeConnDrag.startClientX,
+        e.clientY - activeConnDrag.startClientY
+      );
+
       const dropNodeId =
         findNodeIdAtPoint(svgEl, e.target, e.clientX, e.clientY) ||
         activeConnDrag.hoveredNodeId;
 
       if (activeConnDrag.mode === 'new-connection') {
+        // If user just clicked without dragging (< 6px), treat it as node selection / click-to-connect!
+        if (clientDist < 6 && (!dropNodeId || dropNodeId === activeConnDrag.fromNodeId)) {
+          selectOrLinkClickedElement(e.target as Element);
+          return;
+        }
+
         if (dropNodeId && dropNodeId !== activeConnDrag.fromNodeId) {
           // Connect to existing target node
-          const nextCode = connectNodesInCode(code, activeConnDrag.fromNodeId, dropNodeId);
+          const nextCode = connectNodesInCode(
+            code,
+            activeConnDrag.fromNodeId,
+            dropNodeId,
+            connectEdgeType,
+            connectEdgeLabel
+          );
           onChangeCode(nextCode);
+          setLinkingFromNodeId(null);
         } else if (!dropNodeId) {
           // Dropped on empty canvas space: create a new node and connect it!
           const dist = Math.hypot(
@@ -621,23 +770,8 @@ export const Preview: React.FC<PreviewProps> = ({
 
     if (!wasMoved && onChangeCode) {
       const target = e.target as Element;
-      if (target.closest('.visual-node-editor')) return;
-
-      const info = extractSvgElementInfo(target, code, knownNodes);
-      if (info) {
-        setSelectedEl(info);
-        setEditLabel(info.label);
-        setEditShape(info.shape);
-        if (info.kind === 'edge' && info.edgeType) {
-          setConnectEdgeType(info.edgeType);
-        }
-      } else if (
-        !target.closest(
-          'g.node, g.actor, g.edgeLabel, g.cluster, path[data-edge="true"], .mc-edge-hit'
-        )
-      ) {
-        setSelectedEl(null);
-      }
+      if (target.closest('.visual-node-editor, .floating-selection-bar')) return;
+      selectOrLinkClickedElement(target);
     }
   };
 
@@ -711,6 +845,24 @@ export const Preview: React.FC<PreviewProps> = ({
     onChangeCode(nextCode);
   };
 
+  const handleConnectToExistingNode = (targetIdOverride?: string) => {
+    if (!selectedEl || selectedEl.kind !== 'node' || !onChangeCode) return;
+    const otherNodes = knownNodes.filter((n) => n !== selectedEl.nodeId);
+    const targetId = targetIdOverride || connectTargetNodeId || otherNodes[0];
+    if (!targetId || targetId === selectedEl.nodeId) return;
+
+    const nextCode = connectNodesInCode(
+      code,
+      selectedEl.nodeId,
+      targetId,
+      connectEdgeType,
+      connectEdgeLabel
+    );
+    onChangeCode(nextCode);
+    setConnectEdgeLabel('');
+    setLinkingFromNodeId(null);
+  };
+
   const handleAddConnectedNode = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedEl || !onChangeCode) return;
@@ -752,6 +904,7 @@ export const Preview: React.FC<PreviewProps> = ({
     const nextCode = deleteNodeFromCode(code, selectedEl.nodeId);
     onChangeCode(nextCode);
     setSelectedEl(null);
+    setLinkingFromNodeId(null);
   };
 
   const safeFilename =
@@ -935,7 +1088,9 @@ export const Preview: React.FC<PreviewProps> = ({
 
       <div
         ref={canvasRef}
-        className={`preview-canvas ${isDragging ? 'dragging' : ''}`}
+        className={`preview-canvas ${isDragging ? 'dragging' : ''} ${
+          linkingFromNodeId ? 'linking-target-mode' : ''
+        }`}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
@@ -949,6 +1104,48 @@ export const Preview: React.FC<PreviewProps> = ({
         }}
         data-testid="preview-canvas"
       >
+        {selectedEl?.kind === 'node' && onChangeCode && (
+          <div
+            className="floating-selection-bar"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="floating-selection-bar"
+          >
+            <span className="floating-selection-badge">
+              Node <strong>{selectedEl.nodeId}</strong>
+            </span>
+            <button
+              type="button"
+              className={`btn btn-xs ${
+                linkingFromNodeId === selectedEl.nodeId ? 'btn-primary' : 'btn-secondary'
+              }`}
+              onClick={() =>
+                setLinkingFromNodeId((cur) =>
+                  cur === selectedEl.nodeId ? null : selectedEl.nodeId
+                )
+              }
+              title="Click here, then click any other node on the diagram to connect them"
+              data-testid="floating-connect-node-btn"
+            >
+              <Waypoints size={13} />
+              <span>
+                {linkingFromNodeId === selectedEl.nodeId
+                  ? 'Click target node on canvas…'
+                  : 'Connect to Node'}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-xs btn-danger-outline"
+              onClick={handleDeleteSelectedNode}
+              title="Delete this node (or press Delete / Backspace)"
+              data-testid="floating-delete-node-btn"
+            >
+              <Trash2 size={13} />
+              <span>Delete Node</span>
+            </button>
+          </div>
+        )}
+
         {selectedEl && onChangeCode && (
           <div
             className="visual-node-editor"
@@ -968,7 +1165,10 @@ export const Preview: React.FC<PreviewProps> = ({
               <button
                 type="button"
                 className="icon-btn"
-                onClick={() => setSelectedEl(null)}
+                onClick={() => {
+                  setSelectedEl(null);
+                  setLinkingFromNodeId(null);
+                }}
                 title="Close inspector"
               >
                 <X size={14} />
@@ -1123,8 +1323,62 @@ export const Preview: React.FC<PreviewProps> = ({
                   </div>
                 </div>
 
+                {knownNodes.filter((n) => n !== selectedEl.nodeId).length > 0 && (
+                  <div className="visual-editor-section">
+                    <label className="visual-editor-label">
+                      Connect with Existing Node
+                    </label>
+                    <div className="visual-shape-grid" style={{ marginBottom: '6px' }}>
+                      {knownNodes
+                        .filter((n) => n !== selectedEl.nodeId)
+                        .map((targetId) => (
+                          <button
+                            key={targetId}
+                            type="button"
+                            className="shape-chip"
+                            onClick={() => handleConnectToExistingNode(targetId)}
+                            title={`Connect ${selectedEl.nodeId} ${connectEdgeType} ${targetId}`}
+                            data-testid={`connect-chip-${targetId}`}
+                          >
+                            {selectedEl.nodeId} → {targetId}
+                          </button>
+                        ))}
+                    </div>
+                    <div className="visual-editor-row">
+                      <select
+                        className="input visual-editor-input"
+                        value={
+                          connectTargetNodeId && connectTargetNodeId !== selectedEl.nodeId
+                            ? connectTargetNodeId
+                            : knownNodes.find((n) => n !== selectedEl.nodeId) || ''
+                        }
+                        onChange={(e) => setConnectTargetNodeId(e.target.value)}
+                        aria-label="Target existing node"
+                        data-testid="connect-existing-node-select"
+                      >
+                        {knownNodes
+                          .filter((n) => n !== selectedEl.nodeId)
+                          .map((targetId) => (
+                            <option key={targetId} value={targetId}>
+                              To Node: {targetId}
+                            </option>
+                          ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-primary"
+                        onClick={() => handleConnectToExistingNode()}
+                        data-testid="connect-existing-node-btn"
+                      >
+                        <Waypoints size={13} />
+                        <span>Connect</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <form className="visual-editor-section" onSubmit={handleAddConnectedNode}>
-                  <label className="visual-editor-label">Add Connected Step</label>
+                  <label className="visual-editor-label">Add New Connected Node</label>
                   <div className="visual-editor-row">
                     <select
                       className="input visual-edge-select"
@@ -1160,7 +1414,7 @@ export const Preview: React.FC<PreviewProps> = ({
                       data-testid="visual-connect-node-btn"
                     >
                       <GitBranchPlus size={13} />
-                      <span>Connect</span>
+                      <span>Add &amp; Connect</span>
                     </button>
                   </div>
                 </form>

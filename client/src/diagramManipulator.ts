@@ -566,14 +566,136 @@ export function deleteNodeFromCode(code: string, nodeId: string): string {
   const escId = escapeRegExp(nodeId);
   const nodeTokenRegex = new RegExp(`(^|[^A-Za-z0-9_])(${escId})(?![A-Za-z0-9_])`);
   const lines = code.split('\n');
-  const filtered = lines.filter((line, idx) => {
+
+  // 1. Collect inline shape definitions for all nodes across the diagram
+  const shapeMap = new Map<string, string>();
+  const globalShapeRe = new RegExp(`(?:^|[^A-Za-z0-9_])([A-Za-z0-9_]+)\\s*(${SHAPE_PATTERN})`, 'g');
+  for (const line of lines) {
+    if (/^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|style)\b/.test(line)) {
+      continue;
+    }
+    let m: RegExpExecArray | null;
+    globalShapeRe.lastIndex = 0;
+    while ((m = globalShapeRe.exec(line)) !== null) {
+      const id = m[1];
+      const shapeStr = m[2];
+      if (id && shapeStr && !shapeMap.has(id)) {
+        shapeMap.set(id, shapeStr);
+      }
+    }
+  }
+
+  // 2. Determine which lines are kept vs removed, and track surviving neighbors from removed edges
+  interface RemovedNeighborRef {
+    neighborId: string;
+    indent: string;
+    outputIndex: number;
+  }
+
+  const keptLines: string[] = [];
+  const removedNeighborRefs: RemovedNeighborRef[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Always keep diagram header line
     if (
-      idx === 0 &&
+      i === 0 &&
       /^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram)\b/.test(line)
     ) {
-      return true;
+      keptLines.push(line);
+      continue;
     }
-    return !nodeTokenRegex.test(line);
-  });
-  return filtered.join('\n');
+
+    // Remove style lines for the deleted node
+    if (new RegExp(`^\\s*style\\s+${escId}\\b`).test(line)) {
+      continue;
+    }
+
+    const parsedEdge = parseEdgeLine(line, i);
+    if (parsedEdge) {
+      if (parsedEdge.fromId === nodeId && parsedEdge.toId === nodeId) {
+        continue;
+      }
+      if (parsedEdge.fromId === nodeId) {
+        removedNeighborRefs.push({
+          neighborId: parsedEdge.toId,
+          indent: parsedEdge.indent,
+          outputIndex: keptLines.length,
+        });
+        continue;
+      }
+      if (parsedEdge.toId === nodeId) {
+        removedNeighborRefs.push({
+          neighborId: parsedEdge.fromId,
+          indent: parsedEdge.indent,
+          outputIndex: keptLines.length,
+        });
+        continue;
+      }
+      keptLines.push(line);
+      continue;
+    }
+
+    if (nodeTokenRegex.test(line)) {
+      continue;
+    }
+
+    keptLines.push(line);
+  }
+
+  // 3. Check if surviving neighbors still exist (and still have their shape) in keptLines
+  const handledNeighbors = new Set<string>();
+  const insertions = new Map<number, string[]>();
+
+  for (const ref of removedNeighborRefs) {
+    const { neighborId, indent, outputIndex } = ref;
+    if (handledNeighbors.has(neighborId)) continue;
+
+    const escNeighbor = escapeRegExp(neighborId);
+    const neighborPresentRe = new RegExp(`(^|[^A-Za-z0-9_])(${escNeighbor})(?![A-Za-z0-9_])`);
+    const neighborShapedRe = new RegExp(
+      `(^|[^A-Za-z0-9_])(${escNeighbor})\\s*(${SHAPE_PATTERN})`
+    );
+
+    let isPresent = false;
+    let hasShape = false;
+
+    for (const kLine of keptLines) {
+      if (/^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|style)\b/.test(kLine)) {
+        continue;
+      }
+      if (neighborPresentRe.test(kLine)) {
+        isPresent = true;
+      }
+      if (neighborShapedRe.test(kLine)) {
+        hasShape = true;
+      }
+    }
+
+    const knownShape = shapeMap.get(neighborId) || '';
+    if (!isPresent || (knownShape && !hasShape)) {
+      handledNeighbors.add(neighborId);
+      const list = insertions.get(outputIndex) || [];
+      list.push(`${indent}${neighborId}${knownShape}`);
+      insertions.set(outputIndex, list);
+    }
+  }
+
+  if (insertions.size === 0) {
+    return keptLines.join('\n');
+  }
+
+  const finalLines: string[] = [];
+  for (let idx = 0; idx <= keptLines.length; idx++) {
+    const toInsert = insertions.get(idx);
+    if (toInsert) {
+      finalLines.push(...toInsert);
+    }
+    if (idx < keptLines.length) {
+      finalLines.push(keptLines[idx]);
+    }
+  }
+
+  return finalLines.join('\n');
 }

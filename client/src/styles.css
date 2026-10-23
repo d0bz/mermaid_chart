@@ -1514,3 +1514,48 @@ code {
 .interactive-svg g.node.mc-drop-target {
   filter: drop-shadow(0 0 10px rgba(16, 185, 129, 0.9)) !important;
 }
+
+.interactive-svg g.node.mc-selected-node {
+  filter: drop-shadow(0 0 8px rgba(99, 102, 241, 0.85)) !important;
+}
+
+.interactive-svg g.node.mc-selected-node .mc-node-port {
+  opacity: 0.95;
+}
+
+.interactive-svg g.node.mc-linking-source {
+  filter: drop-shadow(0 0 10px rgba(245, 158, 11, 0.9)) !important;
+}
+
+.linking-target-mode .interactive-svg g.node:not(.mc-linking-source):hover {
+  filter: drop-shadow(0 0 10px rgba(16, 185, 129, 0.9)) !important;
+  cursor: crosshair;
+}
+
+.floating-selection-bar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 32;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(15, 23, 42, 0.94);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(99, 102, 241, 0.55);
+  border-radius: 999px;
+  padding: 6px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  color: #f8fafc;
+  font-size: 12px;
+}
+
+.floating-selection-badge {
+  padding: 0 4px;
+  color: #cbd5e1;
+}
+
+.floating-selection-badge strong {
+  color: #ffffff;
+}
