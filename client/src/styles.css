@@ -1442,3 +1442,75 @@ code {
   display: flex;
   justify-content: flex-end;
 }
+
+/* Interactive Connection Ports, Edge Endpoints & Rubber-band Drag */
+.mc-node-port {
+  fill: #ffffff;
+  stroke: #4f46e5;
+  stroke-width: 2px;
+  cursor: crosshair;
+  opacity: 0;
+  transition: opacity 0.14s ease, r 0.12s ease, fill 0.12s ease;
+}
+
+.interactive-svg g.node:hover .mc-node-port,
+.connect-mode-active .mc-node-port {
+  opacity: 0.95;
+}
+
+.mc-node-port:hover {
+  opacity: 1 !important;
+  fill: #4f46e5;
+  r: 8px;
+}
+
+.mc-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14px;
+  cursor: pointer;
+}
+
+.mc-edge-hit:hover {
+  stroke: rgba(99, 102, 241, 0.22);
+}
+
+.mc-edge-endpoint {
+  cursor: grab;
+  opacity: 0.35;
+  transition: opacity 0.14s ease, r 0.12s ease, fill 0.12s ease;
+}
+
+.preview-canvas:hover .mc-edge-endpoint {
+  opacity: 0.85;
+}
+
+.mc-edge-source-handle {
+  fill: #ffffff;
+  stroke: #6366f1;
+  stroke-width: 2px;
+}
+
+.mc-edge-target-handle {
+  fill: #6366f1;
+  stroke: #ffffff;
+  stroke-width: 2px;
+}
+
+.mc-edge-endpoint:hover {
+  opacity: 1 !important;
+  fill: #f59e0b;
+  stroke: #ffffff;
+  r: 8.5px;
+}
+
+.mc-rubberband-line {
+  stroke: #4f46e5;
+  stroke-width: 2.5px;
+  stroke-dasharray: 6 4;
+  pointer-events: none;
+}
+
+.interactive-svg g.node.mc-drop-target {
+  filter: drop-shadow(0 0 10px rgba(16, 185, 129, 0.9)) !important;
+}

@@ -7,11 +7,16 @@ export type NodeShape =
   | 'cylinder'
   | 'circle';
 
+export type EdgeArrowType = '-->' | '-.->' | '==>';
+
 export interface SelectedDiagramElement {
-  kind: 'node' | 'edgeLabel' | 'cluster';
+  kind: 'node' | 'edge' | 'edgeLabel' | 'cluster';
   nodeId: string;
   label: string;
   shape: NodeShape;
+  fromId?: string;
+  toId?: string;
+  edgeType?: EdgeArrowType;
 }
 
 export interface NodeColorPreset {
@@ -95,12 +100,11 @@ export function parseShapeFromDelimited(delimited: string): {
   return { shape: 'rect', inner: delimited };
 }
 
+const SHAPE_PATTERN = `(?:\\(\\[[\\s\\S]*?\\]\\)|\\[\\([\\s\\S]*?\\)\\]|\\(\\([\\s\\S]*?\\)\\)|\\{\\{[\\s\\S]*?\\}\\}|\\[[\\s\\S]*?\\]|\\([\\s\\S]*?\\)|\\{[\\s\\S]*?\\})`;
+
 export function detectNodeShapeInCode(code: string, nodeId: string): NodeShape {
   const esc = escapeRegExp(nodeId);
-  const re = new RegExp(
-    `(?:^|[^A-Za-z0-9_])(${esc})\\s*(\\(\\[[\\s\\S]*?\\]\\)|\\[\\([\\s\\S]*?\\)\\]|\\(\\([\\s\\S]*?\\)\\)|\\{\\{[\\s\\S]*?\\}\\}|\\[[\\s\\S]*?\\]|\\([\\s\\S]*?\\)|\\{[\\s\\S]*?\\})`,
-    'm'
-  );
+  const re = new RegExp(`(?:^|[^A-Za-z0-9_])(${esc})\\s*(${SHAPE_PATTERN})`, 'm');
   const match = code.match(re);
   if (match && match[2]) {
     return parseShapeFromDelimited(match[2]).shape;
@@ -108,16 +112,186 @@ export function detectNodeShapeInCode(code: string, nodeId: string): NodeShape {
   return 'rect';
 }
 
+export function extractNodeIdFromGroup(nodeGroup: Element): string {
+  let nodeId = nodeGroup.getAttribute('data-id') || '';
+  if (!nodeId) {
+    const rawId = (nodeGroup.getAttribute('id') || '').replace(
+      /^mermaid-svg-\d+-\d+-/,
+      ''
+    );
+    const m = rawId.match(/^(?:flowchart|state|classId|entity|node)-(.+?)-\d+$/);
+    if (m) {
+      nodeId = m[1];
+    } else if (rawId) {
+      nodeId = rawId;
+    }
+  }
+  return nodeId;
+}
+
+export function parseEdgeDataId(
+  edgeDataId: string,
+  knownNodeIds: string[]
+): { fromId: string; toId: string; index: number } | null {
+  const cleaned = edgeDataId.replace(/^mermaid-svg-\d+-\d+-/, '');
+  const m = cleaned.match(/^L_(.+)_(\d+)$/);
+  if (!m) return null;
+  const body = m[1];
+  const index = Number(m[2]);
+
+  // Match against known node IDs first (handles node IDs containing underscores)
+  for (const candFrom of knownNodeIds) {
+    if (body.startsWith(`${candFrom}_`)) {
+      const rest = body.slice(candFrom.length + 1);
+      if (knownNodeIds.includes(rest)) {
+        return { fromId: candFrom, toId: rest, index };
+      }
+    }
+  }
+
+  const parts = body.split('_');
+  if (parts.length >= 2) {
+    return {
+      fromId: parts[0],
+      toId: parts.slice(1).join('_'),
+      index,
+    };
+  }
+  return null;
+}
+
+interface ParsedEdgeLine {
+  lineIndex: number;
+  indent: string;
+  fromId: string;
+  fromShape: string;
+  arrowType: EdgeArrowType;
+  label: string;
+  toId: string;
+  toShape: string;
+}
+
+export function parseEdgeLine(line: string, lineIndex: number): ParsedEdgeLine | null {
+  // Match: indent + fromId + optional shape + arrow(with optional label) + toId + optional shape
+  const re = new RegExp(
+    `^(\\s*)([A-Za-z0-9_]+)\\s*(${SHAPE_PATTERN})?\\s*` +
+      `(?:` +
+      `(--\\s+([^\\n]+?)\\s+-->)|` +
+      `(-\\.\\s+([^\\n]+?)\\s+\\.->)|` +
+      `(==\\s+([^\\n]+?)\\s+==>)|` +
+      `(-->|-\\.->|==>|---)(?:\\s*\\|([^|]*)\\|)?` +
+      `)\\s*` +
+      `([A-Za-z0-9_]+)\\s*(${SHAPE_PATTERN})?\\s*;?\\s*$`
+  );
+  const m = line.match(re);
+  if (!m) return null;
+
+  const indent = m[1] || '    ';
+  const fromId = m[2];
+  const fromShape = m[3] || '';
+
+  let arrowType: EdgeArrowType = '-->';
+  let label = '';
+
+  if (m[4]) {
+    arrowType = '-->';
+    label = m[5].trim();
+  } else if (m[6]) {
+    arrowType = '-.->';
+    label = m[7].trim();
+  } else if (m[8]) {
+    arrowType = '==>';
+    label = m[9].trim();
+  } else if (m[10]) {
+    const rawArrow = m[10];
+    arrowType = rawArrow === '-.->' ? '-.->' : rawArrow === '==>' ? '==>' : '-->';
+    label = (m[11] || '').trim();
+  }
+
+  const toId = m[12];
+  const toShape = m[13] || '';
+
+  return {
+    lineIndex,
+    indent,
+    fromId,
+    fromShape,
+    arrowType,
+    label,
+    toId,
+    toShape,
+  };
+}
+
+function formatEdgeArrow(arrowType: EdgeArrowType, label?: string): string {
+  const clean = label?.trim() || '';
+  if (!clean) return arrowType;
+  return `${arrowType}|${clean}|`;
+}
+
+export function findEdgeInCode(
+  code: string,
+  fromId: string,
+  toId: string
+): ParsedEdgeLine | null {
+  const lines = code.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const parsed = parseEdgeLine(lines[i], i);
+    if (parsed && parsed.fromId === fromId && parsed.toId === toId) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
 export function extractSvgElementInfo(
   target: Element,
-  code: string
+  code: string,
+  knownNodeIds: string[] = []
 ): SelectedDiagramElement | null {
+  // Check if user clicked an edge path or custom edge handle
+  const edgePath = target.closest('path[data-edge="true"], .mc-edge-hit, .mc-edge-endpoint');
+  if (edgePath) {
+    const dataId =
+      edgePath.getAttribute('data-edge-id') || edgePath.getAttribute('data-id') || '';
+    const parsedIds = parseEdgeDataId(dataId, knownNodeIds);
+    if (parsedIds) {
+      const edgeLine = findEdgeInCode(code, parsedIds.fromId, parsedIds.toId);
+      return {
+        kind: 'edge',
+        nodeId: dataId,
+        fromId: parsedIds.fromId,
+        toId: parsedIds.toId,
+        label: edgeLine?.label || '',
+        edgeType: edgeLine?.arrowType || '-->',
+        shape: 'rect',
+      };
+    }
+  }
+
   const nodeGroup = target.closest('g.node, g.actor, g.edgeLabel, g.cluster');
   if (!nodeGroup) return null;
 
   if (nodeGroup.classList.contains('edgeLabel')) {
+    const labelGroup = nodeGroup.querySelector('g.label[data-id]');
+    const dataId = labelGroup?.getAttribute('data-id') || '';
+    const parsedIds = dataId ? parseEdgeDataId(dataId, knownNodeIds) : null;
     const text =
       nodeGroup.querySelector('.edgeLabel, span, text')?.textContent?.trim() || '';
+
+    if (parsedIds) {
+      const edgeLine = findEdgeInCode(code, parsedIds.fromId, parsedIds.toId);
+      return {
+        kind: 'edge',
+        nodeId: dataId,
+        fromId: parsedIds.fromId,
+        toId: parsedIds.toId,
+        label: edgeLine?.label ?? text,
+        edgeType: edgeLine?.arrowType || '-->',
+        shape: 'rect',
+      };
+    }
+
     if (!text) return null;
     return {
       kind: 'edgeLabel',
@@ -139,20 +313,7 @@ export function extractSvgElementInfo(
     };
   }
 
-  let nodeId = nodeGroup.getAttribute('data-id') || '';
-  if (!nodeId) {
-    const rawId = (nodeGroup.getAttribute('id') || '').replace(
-      /^mermaid-svg-\d+-\d+-/,
-      ''
-    );
-    const m = rawId.match(/^(?:flowchart|state|classId|entity|node)-(.+?)-\d+$/);
-    if (m) {
-      nodeId = m[1];
-    } else if (rawId) {
-      nodeId = rawId;
-    }
-  }
-
+  const nodeId = extractNodeIdFromGroup(nodeGroup);
   const labelEl = nodeGroup.querySelector('.nodeLabel, .label, text');
   const label = labelEl?.textContent?.trim() || nodeId;
 
@@ -168,26 +329,145 @@ export function extractSvgElementInfo(
   };
 }
 
+function hasOtherShapeDefinition(
+  lines: string[],
+  ignoreLineIdx: number,
+  nodeId: string
+): boolean {
+  const esc = escapeRegExp(nodeId);
+  const re = new RegExp(`(?:^|[^A-Za-z0-9_])(${esc})\\s*(${SHAPE_PATTERN})`);
+  for (let i = 0; i < lines.length; i++) {
+    if (i === ignoreLineIdx) continue;
+    if (re.test(lines[i])) return true;
+  }
+  return false;
+}
+
+export function reconnectEdgeInCode(
+  code: string,
+  oldFromId: string,
+  oldToId: string,
+  newFromId: string,
+  newToId: string
+): string {
+  if (oldFromId === newFromId && oldToId === newToId) return code;
+
+  const lines = code.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const parsed = parseEdgeLine(lines[i], i);
+    if (parsed && parsed.fromId === oldFromId && parsed.toId === oldToId) {
+      const replacementLines: string[] = [];
+
+      // If oldFromId is changing and had an inline shape definition not defined elsewhere, preserve it
+      let keptFromShape = parsed.fromShape;
+      if (oldFromId !== newFromId) {
+        keptFromShape = '';
+        if (parsed.fromShape && !hasOtherShapeDefinition(lines, i, oldFromId)) {
+          replacementLines.push(`${parsed.indent}${oldFromId}${parsed.fromShape}`);
+        }
+      }
+
+      // If oldToId is changing and had an inline shape definition not defined elsewhere, preserve it
+      let keptToShape = parsed.toShape;
+      if (oldToId !== newToId) {
+        keptToShape = '';
+        if (parsed.toShape && !hasOtherShapeDefinition(lines, i, oldToId)) {
+          replacementLines.push(`${parsed.indent}${oldToId}${parsed.toShape}`);
+        }
+      }
+
+      const arrowStr = formatEdgeArrow(parsed.arrowType, parsed.label);
+      replacementLines.push(
+        `${parsed.indent}${newFromId}${keptFromShape} ${arrowStr} ${newToId}${keptToShape}`
+      );
+
+      lines.splice(i, 1, ...replacementLines);
+      return lines.join('\n');
+    }
+  }
+
+  return code;
+}
+
+export function connectNodesInCode(
+  code: string,
+  fromNodeId: string,
+  toNodeId: string,
+  edgeType: EdgeArrowType = '-->',
+  edgeLabel?: string
+): string {
+  const arrow = formatEdgeArrow(edgeType, edgeLabel);
+  const trimmed = code.replace(/\s+$/, '');
+  return `${trimmed}\n    ${fromNodeId} ${arrow} ${toNodeId}\n`;
+}
+
+export function updateEdgeInCode(
+  code: string,
+  fromId: string,
+  toId: string,
+  opts: { label?: string; edgeType?: EdgeArrowType }
+): string {
+  const lines = code.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const parsed = parseEdgeLine(lines[i], i);
+    if (parsed && parsed.fromId === fromId && parsed.toId === toId) {
+      const nextArrow = opts.edgeType ?? parsed.arrowType;
+      const nextLabel = opts.label !== undefined ? opts.label : parsed.label;
+      const arrowStr = formatEdgeArrow(nextArrow, nextLabel);
+      lines[i] =
+        `${parsed.indent}${parsed.fromId}${parsed.fromShape} ${arrowStr} ${parsed.toId}${parsed.toShape}`;
+      return lines.join('\n');
+    }
+  }
+  return code;
+}
+
+export function deleteEdgeInCode(code: string, fromId: string, toId: string): string {
+  const lines = code.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const parsed = parseEdgeLine(lines[i], i);
+    if (parsed && parsed.fromId === fromId && parsed.toId === toId) {
+      const preserved: string[] = [];
+      if (parsed.fromShape && !hasOtherShapeDefinition(lines, i, fromId)) {
+        preserved.push(`${parsed.indent}${fromId}${parsed.fromShape}`);
+      }
+      if (parsed.toShape && !hasOtherShapeDefinition(lines, i, toId)) {
+        preserved.push(`${parsed.indent}${toId}${parsed.toShape}`);
+      }
+      lines.splice(i, 1, ...preserved);
+      return lines.join('\n');
+    }
+  }
+  return code;
+}
+
 export function updateNodeInCode(
   code: string,
   element: SelectedDiagramElement,
   newLabel: string,
   newShape?: NodeShape
 ): string {
-  const trimmedLabel = newLabel.trim() || element.label;
+  const trimmedLabel = newLabel.trim();
+
+  if (element.kind === 'edge' && element.fromId && element.toId) {
+    return updateEdgeInCode(code, element.fromId, element.toId, {
+      label: trimmedLabel,
+      edgeType: element.edgeType,
+    });
+  }
 
   if (element.kind === 'edgeLabel' || element.kind === 'cluster') {
     if (!element.label || element.label === trimmedLabel) return code;
-    return code.replace(element.label, trimmedLabel);
+    return code.replace(element.label, trimmedLabel || element.label);
   }
 
+  const finalLabel = trimmedLabel || element.label;
   const escId = escapeRegExp(element.nodeId);
   const shapeToUse = newShape ?? element.shape;
-  const wrapped = wrapNodeShape(trimmedLabel, shapeToUse);
+  const wrapped = wrapNodeShape(finalLabel, shapeToUse);
 
-  // 1. Check if nodeId has an explicit shape definition like A[Start] or B{Decision}
   const shapedRegex = new RegExp(
-    `(^|[^A-Za-z0-9_])(${escId})\\s*(\\(\\[[\\s\\S]*?\\]\\)|\\[\\([\\s\\S]*?\\)\\]|\\(\\([\\s\\S]*?\\)\\)|\\{\\{[\\s\\S]*?\\}\\}|\\[[\\s\\S]*?\\]|\\([\\s\\S]*?\\)|\\{[\\s\\S]*?\\})`,
+    `(^|[^A-Za-z0-9_])(${escId})\\s*(${SHAPE_PATTERN})`,
     'm'
   );
 
@@ -195,7 +475,6 @@ export function updateNodeInCode(
     return code.replace(shapedRegex, `$1$2${wrapped}`);
   }
 
-  // 2. If nodeId is used bare in a flowchart/graph line, attach the shape/label to its first occurrence
   const lines = code.split('\n');
   const bareRegex = new RegExp(`(^|[^A-Za-z0-9_])(${escId})(?![A-Za-z0-9_])`);
   for (let i = 0; i < lines.length; i++) {
@@ -212,9 +491,8 @@ export function updateNodeInCode(
     }
   }
 
-  // 3. Fallback: replace old label text if present
   if (element.label && code.includes(element.label)) {
-    return code.replace(element.label, trimmedLabel);
+    return code.replace(element.label, finalLabel);
   }
 
   return code;
@@ -252,7 +530,7 @@ export function addConnectedNodeInCode(
   code: string,
   fromNodeId: string,
   opts: {
-    edgeType: '-->' | '-.->' | '==>';
+    edgeType: EdgeArrowType;
     edgeLabel?: string;
     targetLabel: string;
     targetShape: NodeShape;
@@ -260,10 +538,7 @@ export function addConnectedNodeInCode(
 ): { code: string; newNodeId: string } {
   const newNodeId = generateNextNodeId(code, 'N');
   const wrappedTarget = wrapNodeShape(opts.targetLabel.trim() || 'New Step', opts.targetShape);
-  const cleanEdgeLabel = opts.edgeLabel?.trim();
-  const arrow = cleanEdgeLabel
-    ? `${opts.edgeType}|${cleanEdgeLabel}|`
-    : opts.edgeType;
+  const arrow = formatEdgeArrow(opts.edgeType, opts.edgeLabel);
 
   const newLine = `    ${fromNodeId} ${arrow} ${newNodeId}${wrappedTarget}`;
   const trimmed = code.replace(/\s+$/, '');
