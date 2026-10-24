@@ -15,6 +15,8 @@ import {
   MousePointerClick,
   Waypoints,
   ArrowLeftRight,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 import { renderMermaidSvg, type MermaidTheme } from '../mermaidRenderer';
 import {
@@ -44,6 +46,10 @@ interface PreviewProps {
   theme: MermaidTheme;
   onThemeChange: (theme: MermaidTheme) => void;
   onChangeCode?: (nextCode: string) => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 interface ConnectionDragState {
@@ -139,6 +145,10 @@ export const Preview: React.FC<PreviewProps> = ({
   theme,
   onThemeChange,
   onChangeCode,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
 }) => {
   const [svg, setSvg] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
@@ -458,7 +468,7 @@ export const Preview: React.FC<PreviewProps> = ({
     overlayLayer.appendChild(rubberLine);
 
     svgEl.appendChild(overlayLayer);
-  }, [svg, onChangeCode]);
+  }, [svg, Boolean(onChangeCode)]);
 
   // Keep SVG visual selection state (.mc-selected-node / .mc-selected-edge / .mc-linking-source) synced with selectedEl
   useEffect(() => {
@@ -1248,6 +1258,34 @@ export const Preview: React.FC<PreviewProps> = ({
           {onChangeCode && (
             <>
               <div className="toolbar-divider" />
+              {onUndo && (
+                <button
+                  type="button"
+                  className="btn btn-xs btn-secondary"
+                  onClick={onUndo}
+                  disabled={!canUndo}
+                  title="Undo last change (Ctrl+Z)"
+                  aria-label="Undo"
+                  data-testid="preview-undo-btn"
+                >
+                  <Undo2 size={13} />
+                  <span>Undo</span>
+                </button>
+              )}
+              {onRedo && (
+                <button
+                  type="button"
+                  className="btn btn-xs btn-secondary"
+                  onClick={onRedo}
+                  disabled={!canRedo}
+                  title="Redo change (Ctrl+Y / Ctrl+Shift+Z)"
+                  aria-label="Redo"
+                  data-testid="preview-redo-btn"
+                >
+                  <Redo2 size={13} />
+                  <span>Redo</span>
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn-xs btn-primary"

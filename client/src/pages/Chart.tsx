@@ -12,6 +12,8 @@ import {
   Clock,
   Sparkles,
   Link as LinkIcon,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 import {
   isValidHash,
@@ -50,6 +52,8 @@ export const Chart: React.FC = () => {
   const [chartName, setChartName] = useState('');
   const [code, setCode] = useState('');
   const [baseRevision, setBaseRevision] = useState(1);
+  const [historyPast, setHistoryPast] = useState<string[]>([]);
+  const [historyFuture, setHistoryFuture] = useState<string[]>([]);
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
   const [conflictChart, setConflictChart] = useState<ChartType | null>(null);
@@ -63,14 +67,105 @@ export const Chart: React.FC = () => {
   // Refs to coordinate debounced autosave and in-flight requests cleanly
   const lastSavedRef = useRef<{ name: string; code: string }>({ name: '', code: '' });
   const latestDraftRef = useRef<{ name: string; code: string }>({ name: '', code: '' });
+  const currentCodeRef = useRef<string>('');
+  const lastTypingPushTimeRef = useRef<number>(0);
   const baseRevisionRef = useRef<number>(1);
   const saveStatusRef = useRef<SaveStatus>('saved');
   const savingInFlightRef = useRef<boolean>(false);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
 
   latestDraftRef.current = { name: chartName, code };
+  currentCodeRef.current = code;
   baseRevisionRef.current = baseRevision;
   saveStatusRef.current = saveStatus;
+
+  const applyCodeChange = useCallback((nextCode: string, coalesceTyping = false) => {
+    const prevCode = currentCodeRef.current;
+    if (nextCode === prevCode) return;
+
+    const now = Date.now();
+    const shouldPushSnapshot =
+      !coalesceTyping || now - lastTypingPushTimeRef.current > 450;
+
+    if (shouldPushSnapshot) {
+      setHistoryPast((past) => [...past.slice(-99), prevCode]);
+      if (coalesceTyping) {
+        lastTypingPushTimeRef.current = now;
+      } else {
+        lastTypingPushTimeRef.current = 0;
+      }
+    }
+    setHistoryFuture([]);
+    currentCodeRef.current = nextCode;
+    setCode(nextCode);
+  }, []);
+
+  const handleVisualCodeChange = useCallback(
+    (next: string) => applyCodeChange(next, false),
+    [applyCodeChange]
+  );
+
+  const handleEditorCodeChange = useCallback(
+    (next: string) => applyCodeChange(next, true),
+    [applyCodeChange]
+  );
+
+  const handleUndo = useCallback(() => {
+    setHistoryPast((past) => {
+      if (past.length === 0) return past;
+      const previous = past[past.length - 1];
+      const current = currentCodeRef.current;
+      setHistoryFuture((future) => [current, ...future.slice(0, 99)]);
+      currentCodeRef.current = previous;
+      lastTypingPushTimeRef.current = 0;
+      setCode(previous);
+      return past.slice(0, -1);
+    });
+  }, []);
+
+  const handleRedo = useCallback(() => {
+    setHistoryFuture((future) => {
+      if (future.length === 0) return future;
+      const next = future[0];
+      const current = currentCodeRef.current;
+      setHistoryPast((past) => [...past.slice(-99), current]);
+      currentCodeRef.current = next;
+      lastTypingPushTimeRef.current = 0;
+      setCode(next);
+      return future.slice(1);
+    });
+  }, []);
+
+  // Global keyboard shortcuts for Undo (Ctrl/Cmd+Z) and Redo (Ctrl+Y / Ctrl+Shift+Z)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const active = document.activeElement as HTMLElement | null;
+      if (
+        active &&
+        (active.tagName === 'INPUT' ||
+          active.tagName === 'TEXTAREA' ||
+          active.tagName === 'SELECT')
+      ) {
+        return;
+      }
+      const isMod = e.ctrlKey || e.metaKey;
+      if (!isMod) return;
+
+      if (e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      } else if (
+        e.key.toLowerCase() === 'y' ||
+        (e.key.toLowerCase() === 'z' && e.shiftKey)
+      ) {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleUndo, handleRedo]);
 
   // Load initial chart + project data
   useEffect(() => {
@@ -99,7 +194,10 @@ export const Chart: React.FC = () => {
           setProject(projRes.project);
           setSiblingCharts(projRes.charts);
           setChartName(chartRes.chart.name);
+          currentCodeRef.current = chartRes.chart.code;
           setCode(chartRes.chart.code);
+          setHistoryPast([]);
+          setHistoryFuture([]);
           setBaseRevision(chartRes.chart.revision);
           baseRevisionRef.current = chartRes.chart.revision;
           lastSavedRef.current = {
@@ -483,10 +581,8 @@ export const Chart: React.FC = () => {
   };
 
   const handleInsertSnippet = (snippet: string) => {
-    setCode((prev) => {
-      const trimmed = prev.replace(/\s+$/, '');
-      return `${trimmed}\n${snippet}\n`;
-    });
+    const trimmed = currentCodeRef.current.replace(/\s+$/, '');
+    applyCodeChange(`${trimmed}\n${snippet}\n`);
   };
 
   const handleDeleteCurrentChart = async () => {
@@ -628,7 +724,7 @@ export const Chart: React.FC = () => {
               onChange={(e) => {
                 const tpl = MERMAID_TEMPLATES.find((t) => t.id === e.target.value);
                 if (tpl) {
-                  setCode(tpl.code);
+                  applyCodeChange(tpl.code);
                 }
               }}
               aria-label="Starter template"
@@ -709,15 +805,44 @@ export const Chart: React.FC = () => {
           <div className="split-left" style={{ width: `${splitPercent}%` }}>
             <div className="pane-header">
               <span className="pane-title">Mermaid Syntax</span>
-              <span className="pane-hint">Auto-saves to disk</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="btn btn-xs btn-secondary"
+                  onClick={handleUndo}
+                  disabled={historyPast.length === 0}
+                  title="Undo (Ctrl+Z)"
+                  aria-label="Undo"
+                  data-testid="editor-undo-btn"
+                >
+                  <Undo2 size={13} />
+                  <span>Undo</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-xs btn-secondary"
+                  onClick={handleRedo}
+                  disabled={historyFuture.length === 0}
+                  title="Redo (Ctrl+Y)"
+                  aria-label="Redo"
+                  data-testid="editor-redo-btn"
+                >
+                  <Redo2 size={13} />
+                  <span>Redo</span>
+                </button>
+                <span className="pane-hint">Auto-saves to disk</span>
+              </div>
             </div>
             <QuickInsertToolbar
               code={code}
-              onChangeCode={setCode}
+              onChangeCode={handleVisualCodeChange}
               onInsertSnippet={handleInsertSnippet}
             />
             <div className="pane-body">
-              <CodeEditor value={code} onChange={setCode} />
+              <CodeEditor
+                value={code}
+                onChange={handleEditorCodeChange}
+              />
             </div>
           </div>
 
@@ -735,7 +860,11 @@ export const Chart: React.FC = () => {
               chartName={chartName}
               theme={theme}
               onThemeChange={setTheme}
-              onChangeCode={setCode}
+              onChangeCode={handleVisualCodeChange}
+              canUndo={historyPast.length > 0}
+              canRedo={historyFuture.length > 0}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
             />
           </div>
         </div>

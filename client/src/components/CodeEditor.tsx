@@ -37,6 +37,7 @@ const customEditorTheme = EditorView.theme({
 export const CodeEditor: React.FC<CodeEditorProps> = ({ value, onChange }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const isExternalSyncRef = useRef<boolean>(false);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
@@ -44,7 +45,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ value, onChange }) => {
     if (!containerRef.current) return;
 
     const updateListener = EditorView.updateListener.of((update) => {
-      if (update.docChanged) {
+      if (update.docChanged && !isExternalSyncRef.current) {
         const docText = update.state.doc.toString();
         onChangeRef.current(docText);
       }
@@ -82,19 +83,24 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ value, onChange }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Sync external value changes (e.g. switching charts, loading conflict version, applying template)
+  // Sync external value changes (e.g. switching charts, loading conflict version, applying template, undo/redo)
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
     const currentText = view.state.doc.toString();
     if (currentText !== value) {
-      view.dispatch({
-        changes: {
-          from: 0,
-          to: currentText.length,
-          insert: value,
-        },
-      });
+      isExternalSyncRef.current = true;
+      try {
+        view.dispatch({
+          changes: {
+            from: 0,
+            to: currentText.length,
+            insert: value,
+          },
+        });
+      } finally {
+        isExternalSyncRef.current = false;
+      }
     }
   }, [value]);
 
