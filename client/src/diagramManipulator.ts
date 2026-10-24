@@ -588,6 +588,20 @@ export function addConnectedNodeInCode(
   };
 }
 
+export interface CopiedNodeData {
+  sourceNodeId: string;
+  label: string;
+  shape: NodeShape;
+  styleSpec?: string;
+}
+
+export function extractNodeStyleSpec(code: string, nodeId: string): string | undefined {
+  const escId = escapeRegExp(nodeId);
+  const re = new RegExp(`^\\s*style\\s+${escId}\\s+(.+?)\\s*$`, 'm');
+  const m = code.match(re);
+  return m?.[1]?.trim() || undefined;
+}
+
 export function addStandaloneNodeInCode(
   code: string,
   label: string,
@@ -598,6 +612,20 @@ export function addStandaloneNodeInCode(
   const trimmed = code.replace(/\s+$/, '');
   return {
     code: `${trimmed}\n    ${newNodeId}${wrapped}\n`,
+    newNodeId,
+  };
+}
+
+export function pasteNodeInCode(
+  code: string,
+  copied: CopiedNodeData
+): { code: string; newNodeId: string } {
+  const newNodeId = generateNextNodeId(code, 'N');
+  const wrapped = wrapNodeShape(copied.label.trim() || 'Copied Node', copied.shape);
+  const trimmed = code.replace(/\s+$/, '');
+  const styleLine = copied.styleSpec ? `\n    style ${newNodeId} ${copied.styleSpec}` : '';
+  return {
+    code: `${trimmed}\n    ${newNodeId}${wrapped}${styleLine}\n`,
     newNodeId,
   };
 }

@@ -17,6 +17,8 @@ import {
   ArrowLeftRight,
   Undo2,
   Redo2,
+  Copy,
+  ClipboardPaste,
 } from 'lucide-react';
 import { renderMermaidSvg, type MermaidTheme } from '../mermaidRenderer';
 import {
@@ -33,11 +35,14 @@ import {
   updateEdgeInCode,
   deleteEdgeInCode,
   insertNodeOnEdgeInCode,
+  extractNodeStyleSpec,
+  pasteNodeInCode,
   NODE_SHAPES,
   NODE_COLOR_PRESETS,
   type SelectedDiagramElement,
   type NodeShape,
   type EdgeArrowType,
+  type CopiedNodeData,
 } from '../diagramManipulator';
 
 interface PreviewProps {
@@ -166,6 +171,15 @@ export const Preview: React.FC<PreviewProps> = ({
   const [connectLabel, setConnectLabel] = useState<string>('Next Step');
   const [connectEdgeLabel, setConnectEdgeLabel] = useState<string>('');
   const [connectEdgeType, setConnectEdgeType] = useState<EdgeArrowType>('-->');
+  const [copiedNode, setCopiedNode] = useState<CopiedNodeData | null>(() => {
+    try {
+      const raw = sessionStorage.getItem('mc_copied_node');
+      return raw ? (JSON.parse(raw) as CopiedNodeData) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [justCopied, setJustCopied] = useState<boolean>(false);
 
   const dragStartRef = useRef<{
     x: number;
@@ -515,9 +529,42 @@ export const Preview: React.FC<PreviewProps> = ({
     }
   }, [svg, selectedEl, linkingFromNodeId, knownNodes, connectTargetNodeId]);
 
-  // Keyboard shortcuts: Delete / Backspace to delete selected node or connection, Escape to clear selection
+  const handleCopySelectedNode = () => {
+    if (!selectedEl || selectedEl.kind !== 'node') return;
+    const styleSpec = extractNodeStyleSpec(code, selectedEl.nodeId);
+    const data: CopiedNodeData = {
+      sourceNodeId: selectedEl.nodeId,
+      label: selectedEl.label,
+      shape: selectedEl.shape,
+      styleSpec,
+    };
+    setCopiedNode(data);
+    try {
+      sessionStorage.setItem('mc_copied_node', JSON.stringify(data));
+    } catch {
+      // ignore storage errors
+    }
+    setJustCopied(true);
+    setTimeout(() => setJustCopied(false), 1400);
+  };
+
+  const handlePasteNode = () => {
+    if (!copiedNode || !onChangeCode) return;
+    const { code: nextCode, newNodeId } = pasteNodeInCode(code, copiedNode);
+    onChangeCode(nextCode);
+    setSelectedEl({
+      kind: 'node',
+      nodeId: newNodeId,
+      label: copiedNode.label,
+      shape: copiedNode.shape,
+    });
+    setEditLabel(copiedNode.label);
+    setEditShape(copiedNode.shape);
+  };
+
+  // Keyboard shortcuts: Copy (Ctrl/Cmd+C or 'c'), Paste (Ctrl/Cmd+V or 'v'), Delete / Backspace, Escape
   useEffect(() => {
-    if (!selectedEl || !onChangeCode) return;
+    if (!onChangeCode) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
       const active = document.activeElement as HTMLElement | null;
@@ -526,10 +573,38 @@ export const Preview: React.FC<PreviewProps> = ({
         (active.tagName === 'INPUT' ||
           active.tagName === 'TEXTAREA' ||
           active.tagName === 'SELECT' ||
-          active.isContentEditable)
+          active.isContentEditable ||
+          active.closest('.cm-editor'))
       ) {
         return;
       }
+
+      const keyLower = e.key.toLowerCase();
+      const isMod = e.ctrlKey || e.metaKey;
+      const hasTextSelection = Boolean(window.getSelection()?.toString().trim());
+
+      // Copy selected box: Ctrl+C / Cmd+C or pressing 'c' when a node is selected
+      if (
+        selectedEl?.kind === 'node' &&
+        !hasTextSelection &&
+        ((isMod && keyLower === 'c' && !e.shiftKey) || (!isMod && !e.altKey && keyLower === 'c'))
+      ) {
+        e.preventDefault();
+        handleCopySelectedNode();
+        return;
+      }
+
+      // Paste copied box onto the board: Ctrl+V / Cmd+V or pressing 'v' when a box is copied
+      if (
+        copiedNode &&
+        ((isMod && keyLower === 'v' && !e.shiftKey) || (!isMod && !e.altKey && keyLower === 'v'))
+      ) {
+        e.preventDefault();
+        handlePasteNode();
+        return;
+      }
+
+      if (!selectedEl) return;
 
       if (e.key === 'Escape') {
         if (linkingFromNodeId) {
@@ -559,7 +634,7 @@ export const Preview: React.FC<PreviewProps> = ({
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [selectedEl, linkingFromNodeId, code, onChangeCode]);
+  }, [selectedEl, copiedNode, linkingFromNodeId, code, onChangeCode]);
 
   // Mouse wheel zooms in and out directly
   useEffect(() => {
@@ -1298,6 +1373,21 @@ export const Preview: React.FC<PreviewProps> = ({
               </button>
               <button
                 type="button"
+                className="btn btn-xs btn-secondary"
+                onClick={handlePasteNode}
+                disabled={!copiedNode}
+                title={
+                  copiedNode
+                    ? `Paste copied node "${copiedNode.label}" onto board (Ctrl+V or V)`
+                    : 'Select a box and press Ctrl+C (or C) to copy it first'
+                }
+                data-testid="preview-paste-node-btn"
+              >
+                <ClipboardPaste size={13} />
+                <span>{copiedNode ? `Paste "${copiedNode.label}"` : 'Paste'}</span>
+              </button>
+              <button
+                type="button"
                 className={`btn btn-xs ${connectMode ? 'btn-primary' : 'btn-secondary'}`}
                 onClick={() => setConnectMode((m) => !m)}
                 title="When active, drag directly from any node to another node to connect them"
@@ -1380,6 +1470,28 @@ export const Preview: React.FC<PreviewProps> = ({
             <span className="floating-selection-badge">
               Node <strong>{selectedEl.nodeId}</strong>
             </span>
+            <button
+              type="button"
+              className="btn btn-xs btn-secondary"
+              onClick={handleCopySelectedNode}
+              title="Copy this node (Ctrl+C or press C)"
+              data-testid="floating-copy-node-btn"
+            >
+              {justCopied ? <Check size={13} /> : <Copy size={13} />}
+              <span>{justCopied ? 'Copied!' : 'Copy (C)'}</span>
+            </button>
+            {copiedNode && (
+              <button
+                type="button"
+                className="btn btn-xs btn-secondary"
+                onClick={handlePasteNode}
+                title={`Paste "${copiedNode.label}" onto board (Ctrl+V or press V)`}
+                data-testid="floating-paste-node-btn"
+              >
+                <ClipboardPaste size={13} />
+                <span>Paste</span>
+              </button>
+            )}
             <button
               type="button"
               className={`btn btn-xs ${
@@ -1728,7 +1840,17 @@ export const Preview: React.FC<PreviewProps> = ({
                   </div>
                 </form>
 
-                <div className="visual-editor-footer">
+                <div className="visual-editor-footer" style={{ justifyContent: 'space-between' }}>
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-secondary"
+                    onClick={handleCopySelectedNode}
+                    title="Copy this node (Ctrl+C or press C)"
+                    data-testid="visual-copy-node-btn"
+                  >
+                    {justCopied ? <Check size={13} /> : <Copy size={13} />}
+                    <span>{justCopied ? 'Copied!' : 'Copy Node'}</span>
+                  </button>
                   <button
                     type="button"
                     className="btn btn-xs btn-danger-outline"
