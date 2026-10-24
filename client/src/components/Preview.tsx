@@ -19,6 +19,7 @@ import {
   Redo2,
   Copy,
   ClipboardPaste,
+  Pencil,
 } from 'lucide-react';
 import { renderMermaidSvg, type MermaidTheme } from '../mermaidRenderer';
 import {
@@ -69,6 +70,17 @@ interface ConnectionDragState {
   startClientY: number;
   hoveredNodeId: string | null;
   clickedMidpointNode?: boolean;
+}
+
+interface InlineBoxEditState {
+  nodeId: string;
+  value: string;
+  initialLabel: string;
+  shape: NodeShape;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 function clientToSvgCoords(
@@ -180,6 +192,7 @@ export const Preview: React.FC<PreviewProps> = ({
     }
   });
   const [justCopied, setJustCopied] = useState<boolean>(false);
+  const [inlineEdit, setInlineEdit] = useState<InlineBoxEditState | null>(null);
 
   const dragStartRef = useRef<{
     x: number;
@@ -192,6 +205,7 @@ export const Preview: React.FC<PreviewProps> = ({
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const labelInputRef = useRef<HTMLInputElement | null>(null);
+  const inlineInputRef = useRef<HTMLInputElement | null>(null);
 
   // Debounced Mermaid render (~280 ms)
   useEffect(() => {
@@ -282,6 +296,30 @@ export const Preview: React.FC<PreviewProps> = ({
         circle.appendChild(title);
         portsGroup.appendChild(circle);
       }
+
+      // Add interactive quick-edit badge at top-right corner of the box
+      const editBadge = document.createElementNS(svgNs, 'g');
+      editBadge.setAttribute('class', 'mc-node-edit-btn');
+      editBadge.setAttribute('transform', `translate(${bbox.x + bbox.width - 2}, ${bbox.y + 2})`);
+      editBadge.setAttribute('data-mc-edit-node', nodeId);
+      editBadge.setAttribute('data-testid', `node-edit-btn-${nodeId}`);
+
+      const editBg = document.createElementNS(svgNs, 'circle');
+      editBg.setAttribute('class', 'mc-node-edit-circle');
+      editBg.setAttribute('r', '8.5');
+      editBg.setAttribute('cx', '0');
+      editBg.setAttribute('cy', '0');
+
+      const editIcon = document.createElementNS(svgNs, 'path');
+      editIcon.setAttribute('class', 'mc-node-edit-icon');
+      editIcon.setAttribute('d', 'M-3,3 L-1.5,3 L2.8,-1.3 L1.3,-2.8 L-3,1.5 Z M-3.5,3.8 L3.5,3.8');
+
+      const editTitle = document.createElementNS(svgNs, 'title');
+      editTitle.textContent = `Edit text of ${nodeId} (or double-click box)`;
+      editBadge.appendChild(editTitle);
+      editBadge.appendChild(editBg);
+      editBadge.appendChild(editIcon);
+      portsGroup.appendChild(editBadge);
 
       g.appendChild(portsGroup);
     }
@@ -529,6 +567,110 @@ export const Preview: React.FC<PreviewProps> = ({
     }
   }, [svg, selectedEl, linkingFromNodeId, knownNodes, connectTargetNodeId]);
 
+  const computeNodeOverlayRect = (
+    nodeId: string
+  ): { left: number; top: number; width: number; height: number } | null => {
+    const canvasEl = canvasRef.current;
+    const svgEl = stageRef.current?.querySelector('svg');
+    if (!canvasEl || !svgEl) return null;
+
+    const nodeEl = svgEl.querySelector(
+      `g.node[data-mc-node-id="${CSS.escape(nodeId)}"]`
+    );
+    if (!nodeEl) return null;
+
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const shapeEl =
+      nodeEl.querySelector('rect, polygon, circle, path, ellipse') || nodeEl;
+    const rect = shapeEl.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return null;
+
+    return {
+      left: rect.left - canvasRect.left + rect.width / 2,
+      top: rect.top - canvasRect.top + rect.height / 2,
+      width: Math.max(140, rect.width + 24),
+      height: Math.max(38, rect.height + 8),
+    };
+  };
+
+  const startInlineNodeEdit = (nodeInfo?: SelectedDiagramElement) => {
+    const targetNode =
+      nodeInfo && nodeInfo.kind === 'node'
+        ? nodeInfo
+        : selectedEl?.kind === 'node'
+          ? selectedEl
+          : null;
+    if (!targetNode || !onChangeCode) return;
+
+    const rect = computeNodeOverlayRect(targetNode.nodeId) || {
+      left: (canvasRef.current?.clientWidth || 600) / 2,
+      top: (canvasRef.current?.clientHeight || 400) / 2,
+      width: 160,
+      height: 40,
+    };
+
+    setSelectedEl(targetNode);
+    setEditLabel(targetNode.label);
+    setEditShape(targetNode.shape);
+    setInlineEdit({
+      nodeId: targetNode.nodeId,
+      value: targetNode.label,
+      initialLabel: targetNode.label,
+      shape: targetNode.shape,
+      ...rect,
+    });
+  };
+
+  const commitInlineEdit = (overrideValue?: string) => {
+    if (!inlineEdit || !onChangeCode) return;
+    const nextLabel = (overrideValue ?? inlineEdit.value).trim();
+    const currentSelected: SelectedDiagramElement =
+      selectedEl && selectedEl.kind === 'node' && selectedEl.nodeId === inlineEdit.nodeId
+        ? selectedEl
+        : {
+            kind: 'node',
+            nodeId: inlineEdit.nodeId,
+            label: inlineEdit.initialLabel,
+            shape: inlineEdit.shape,
+          };
+
+    if (nextLabel && nextLabel !== inlineEdit.initialLabel) {
+      const nextCode = updateNodeInCode(code, currentSelected, nextLabel, currentSelected.shape);
+      onChangeCode(nextCode);
+      setSelectedEl({
+        ...currentSelected,
+        label: nextLabel,
+      });
+      setEditLabel(nextLabel);
+    }
+    setInlineEdit(null);
+  };
+
+  const cancelInlineEdit = () => {
+    setInlineEdit(null);
+  };
+
+  // Focus & select text when inline box editor opens
+  useEffect(() => {
+    if (!inlineEdit?.nodeId) return;
+    const timer = setTimeout(() => {
+      if (inlineInputRef.current) {
+        inlineInputRef.current.focus();
+        inlineInputRef.current.select();
+      }
+    }, 10);
+    return () => clearTimeout(timer);
+  }, [inlineEdit?.nodeId]);
+
+  // Keep inline box editor position synced when zooming or panning
+  useEffect(() => {
+    if (!inlineEdit?.nodeId) return;
+    const rect = computeNodeOverlayRect(inlineEdit.nodeId);
+    if (rect) {
+      setInlineEdit((prev) => (prev ? { ...prev, ...rect } : null));
+    }
+  }, [scale, pan, svg]);
+
   const handleCopySelectedNode = () => {
     if (!selectedEl || selectedEl.kind !== 'node') return;
     const styleSpec = extractNodeStyleSpec(code, selectedEl.nodeId);
@@ -562,7 +704,7 @@ export const Preview: React.FC<PreviewProps> = ({
     setEditShape(copiedNode.shape);
   };
 
-  // Keyboard shortcuts: Copy (Ctrl/Cmd+C or 'c'), Paste (Ctrl/Cmd+V or 'v'), Delete / Backspace, Escape
+  // Keyboard shortcuts: Copy (Ctrl/Cmd+C or 'c'), Paste (Ctrl/Cmd+V or 'v'), Enter/F2 to edit text, Delete / Backspace, Escape
   useEffect(() => {
     if (!onChangeCode) return;
 
@@ -606,8 +748,17 @@ export const Preview: React.FC<PreviewProps> = ({
 
       if (!selectedEl) return;
 
+      // Press Enter or F2 when a box is selected to edit its text directly on the box
+      if (selectedEl.kind === 'node' && (e.key === 'Enter' || e.key === 'F2')) {
+        e.preventDefault();
+        startInlineNodeEdit(selectedEl);
+        return;
+      }
+
       if (e.key === 'Escape') {
-        if (linkingFromNodeId) {
+        if (inlineEdit) {
+          setInlineEdit(null);
+        } else if (linkingFromNodeId) {
           setLinkingFromNodeId(null);
         } else {
           setSelectedEl(null);
@@ -621,6 +772,7 @@ export const Preview: React.FC<PreviewProps> = ({
           const nextCode = deleteNodeFromCode(code, selectedEl.nodeId);
           onChangeCode(nextCode);
           setSelectedEl(null);
+          setInlineEdit(null);
           setLinkingFromNodeId(null);
         } else if (selectedEl.kind === 'edge' && selectedEl.fromId && selectedEl.toId) {
           const nextCode = deleteEdgeInCode(code, selectedEl.fromId, selectedEl.toId);
@@ -634,7 +786,7 @@ export const Preview: React.FC<PreviewProps> = ({
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [selectedEl, copiedNode, linkingFromNodeId, code, onChangeCode]);
+  }, [selectedEl, copiedNode, inlineEdit, linkingFromNodeId, code, onChangeCode]);
 
   // Mouse wheel zooms in and out directly
   useEffect(() => {
@@ -700,7 +852,7 @@ export const Preview: React.FC<PreviewProps> = ({
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const target = e.target as Element;
-    if (target.closest('.visual-node-editor, .floating-selection-bar')) return;
+    if (target.closest('.visual-node-editor, .floating-selection-bar, .inline-box-editor')) return;
 
     const svgEl = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
 
@@ -867,8 +1019,15 @@ export const Preview: React.FC<PreviewProps> = ({
 
   const selectOrLinkClickedElement = (target: Element) => {
     if (!onChangeCode) return;
+    const clickedEditBadge = Boolean(target.closest('[data-mc-edit-node]'));
     const info = extractSvgElementInfo(target, code, knownNodes);
     if (info) {
+      // If user clicked the quick-edit badge directly on the box, open inline text editing immediately
+      if (clickedEditBadge && info.kind === 'node') {
+        startInlineNodeEdit(info);
+        return;
+      }
+
       // If user is in click-to-connect mode (or Connect Mode with a selected node) and clicked another node: connect them!
       const activeSourceNodeId =
         linkingFromNodeId ||
@@ -891,6 +1050,19 @@ export const Preview: React.FC<PreviewProps> = ({
         return;
       }
 
+      // If clicking on a box that is ALREADY selected (and not clicking a port or in connect mode),
+      // open interactive inline text editing directly on the box!
+      if (
+        info.kind === 'node' &&
+        selectedEl?.kind === 'node' &&
+        selectedEl.nodeId === info.nodeId &&
+        !activeSourceNodeId &&
+        !target.closest('.mc-node-port')
+      ) {
+        startInlineNodeEdit(info);
+        return;
+      }
+
       setSelectedEl(info);
       setEditLabel(info.label);
       setEditShape(info.shape);
@@ -907,6 +1079,17 @@ export const Preview: React.FC<PreviewProps> = ({
     ) {
       setSelectedEl(null);
       setLinkingFromNodeId(null);
+    }
+  };
+
+  const handleDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!onChangeCode) return;
+    const target = e.target as Element;
+    if (target.closest('.visual-node-editor, .floating-selection-bar, .inline-box-editor')) return;
+    const info = extractSvgElementInfo(target, code, knownNodes);
+    if (info && info.kind === 'node') {
+      e.stopPropagation();
+      startInlineNodeEdit(info);
     }
   };
 
@@ -1084,7 +1267,7 @@ export const Preview: React.FC<PreviewProps> = ({
 
     if (!wasMoved && onChangeCode) {
       const target = e.target as Element;
-      if (target.closest('.visual-node-editor, .floating-selection-bar')) return;
+      if (target.closest('.visual-node-editor, .floating-selection-bar, .inline-box-editor')) return;
       selectOrLinkClickedElement(target);
     }
   };
@@ -1451,6 +1634,7 @@ export const Preview: React.FC<PreviewProps> = ({
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
+        onDoubleClick={handleDoubleClick}
         onMouseLeave={() => {
           setIsDragging(false);
           dragStartRef.current = null;
@@ -1461,6 +1645,65 @@ export const Preview: React.FC<PreviewProps> = ({
         }}
         data-testid="preview-canvas"
       >
+        {inlineEdit && onChangeCode && (
+          <div
+            className="inline-box-editor"
+            style={{
+              left: `${inlineEdit.left}px`,
+              top: `${inlineEdit.top}px`,
+              minWidth: `${inlineEdit.width}px`,
+              minHeight: `${inlineEdit.height}px`,
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onMouseUp={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            data-testid="inline-box-editor"
+          >
+            <input
+              ref={inlineInputRef}
+              type="text"
+              className="inline-box-input"
+              value={inlineEdit.value}
+              onChange={(e) =>
+                setInlineEdit((prev) => (prev ? { ...prev, value: e.target.value } : null))
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commitInlineEdit();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  cancelInlineEdit();
+                }
+              }}
+              onBlur={() => commitInlineEdit()}
+              aria-label={`Edit text for box ${inlineEdit.nodeId}`}
+              data-testid="inline-box-input"
+            />
+            <button
+              type="button"
+              className="inline-box-btn inline-box-save"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => commitInlineEdit()}
+              title="Apply text (Enter)"
+              data-testid="inline-box-save-btn"
+            >
+              <Check size={13} />
+            </button>
+            <button
+              type="button"
+              className="inline-box-btn inline-box-cancel"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => cancelInlineEdit()}
+              title="Cancel (Esc)"
+              data-testid="inline-box-cancel-btn"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
         {selectedEl?.kind === 'node' && onChangeCode && (
           <div
             className="floating-selection-bar"
@@ -1470,6 +1713,16 @@ export const Preview: React.FC<PreviewProps> = ({
             <span className="floating-selection-badge">
               Node <strong>{selectedEl.nodeId}</strong>
             </span>
+            <button
+              type="button"
+              className="btn btn-xs btn-primary"
+              onClick={() => startInlineNodeEdit(selectedEl)}
+              title="Edit text directly on the box (or click box again / double-click / press Enter)"
+              data-testid="floating-edit-text-btn"
+            >
+              <Pencil size={13} />
+              <span>Edit Text</span>
+            </button>
             <button
               type="button"
               className="btn btn-xs btn-secondary"

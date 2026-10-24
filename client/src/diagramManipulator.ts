@@ -508,7 +508,7 @@ export function updateNodeInCode(
 
   const shapedRegex = new RegExp(
     `(^|[^A-Za-z0-9_])(${escId})\\s*(${SHAPE_PATTERN})`,
-    'm'
+    'gm'
   );
 
   if (shapedRegex.test(code)) {
