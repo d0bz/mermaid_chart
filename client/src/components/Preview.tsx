@@ -30,6 +30,7 @@ import {
   reconnectEdgeInCode,
   updateEdgeInCode,
   deleteEdgeInCode,
+  insertNodeOnEdgeInCode,
   NODE_SHAPES,
   NODE_COLOR_PRESETS,
   type SelectedDiagramElement,
@@ -56,6 +57,7 @@ interface ConnectionDragState {
   startClientX: number;
   startClientY: number;
   hoveredNodeId: string | null;
+  clickedMidpointNode?: boolean;
 }
 
 function clientToSvgCoords(
@@ -272,59 +274,143 @@ export const Preview: React.FC<PreviewProps> = ({
       const parsed = parseEdgeDataId(dataId, nodeIds);
       if (!parsed) continue;
 
+      const edgeGroup = document.createElementNS(svgNs, 'g');
+      edgeGroup.setAttribute('class', 'mc-edge-group');
+      edgeGroup.setAttribute('data-edge-id', dataId);
+      edgeGroup.setAttribute('data-from', parsed.fromId);
+      edgeGroup.setAttribute('data-to', parsed.toId);
+      edgeGroup.setAttribute('data-testid', `edge-group-${parsed.fromId}-${parsed.toId}`);
+
+      // Compute start (x0, y0), midpoint (xm, ym), and end (x1, y1) points from path geometry or data-points
+      let startPt: { x: number; y: number } | null = null;
+      let midPt: { x: number; y: number } | null = null;
+      let endPt: { x: number; y: number } | null = null;
+
+      try {
+        const svgPath = pathEl as SVGPathElement;
+        const total = svgPath.getTotalLength();
+        if (total > 0) {
+          const p0 = svgPath.getPointAtLength(0);
+          const pm = svgPath.getPointAtLength(total * 0.5);
+          const p1 = svgPath.getPointAtLength(total);
+          startPt = { x: p0.x, y: p0.y };
+          midPt = { x: pm.x, y: pm.y };
+          endPt = { x: p1.x, y: p1.y };
+        }
+      } catch {
+        // Fallback to data-points below
+      }
+
+      if (!startPt || !endPt) {
+        const b64Points = pathEl.getAttribute('data-points');
+        if (b64Points) {
+          try {
+            const pts = JSON.parse(atob(b64Points));
+            if (Array.isArray(pts) && pts.length >= 2) {
+              startPt = { x: Number(pts[0].x), y: Number(pts[0].y) };
+              const midIdx = Math.floor(pts.length / 2);
+              midPt = { x: Number(pts[midIdx].x), y: Number(pts[midIdx].y) };
+              endPt = {
+                x: Number(pts[pts.length - 1].x),
+                y: Number(pts[pts.length - 1].y),
+              };
+            }
+          } catch {
+            // Fallback to node centers
+          }
+        }
+      }
+
+      if (!startPt || !endPt) {
+        startPt = nodeCenters.get(parsed.fromId) || null;
+        endPt = nodeCenters.get(parsed.toId) || null;
+      }
+      if (!midPt && startPt && endPt) {
+        midPt = {
+          x: (startPt.x + endPt.x) / 2,
+          y: (startPt.y + endPt.y) / 2,
+        };
+      }
+
       const dAttr = pathEl.getAttribute('d') || '';
       if (dAttr) {
+        // Visible highlight stroke along the line when hovered or selected
+        const highlightPath = document.createElementNS(svgNs, 'path');
+        highlightPath.setAttribute('d', dAttr);
+        highlightPath.setAttribute('class', 'mc-edge-highlight');
+        edgeGroup.appendChild(highlightPath);
+
+        // Wide clickable & directly draggable hit path
         const hitPath = document.createElementNS(svgNs, 'path');
         hitPath.setAttribute('d', dAttr);
         hitPath.setAttribute('class', 'mc-edge-hit');
         hitPath.setAttribute('data-edge-id', dataId);
         hitPath.setAttribute('data-from', parsed.fromId);
         hitPath.setAttribute('data-to', parsed.toId);
+        if (startPt && endPt) {
+          hitPath.setAttribute('data-start-x', String(startPt.x));
+          hitPath.setAttribute('data-start-y', String(startPt.y));
+          hitPath.setAttribute('data-end-x', String(endPt.x));
+          hitPath.setAttribute('data-end-y', String(endPt.y));
+        }
         hitPath.setAttribute('data-testid', `edge-path-${parsed.fromId}-${parsed.toId}`);
-        overlayLayer.appendChild(hitPath);
+        const hitTitle = document.createElementNS(svgNs, 'title');
+        hitTitle.textContent = `Click to select connection (${parsed.fromId} → ${parsed.toId}) and show end point, or drag line directly to another node`;
+        hitPath.appendChild(hitTitle);
+        edgeGroup.appendChild(hitPath);
       }
 
-      // Decode start (x0, y0) and end (x1, y1) points from data-points or path geometry
-      let startPt: { x: number; y: number } | null = null;
-      let endPt: { x: number; y: number } | null = null;
+      if (startPt && endPt && midPt) {
+        // Interactive midpoint node shown when hovering over the connection line
+        const midNodeGroup = document.createElementNS(svgNs, 'g');
+        midNodeGroup.setAttribute('class', 'mc-edge-midpoint-node');
+        midNodeGroup.setAttribute('transform', `translate(${midPt.x}, ${midPt.y})`);
+        midNodeGroup.setAttribute('data-edge-id', dataId);
+        midNodeGroup.setAttribute('data-from', parsed.fromId);
+        midNodeGroup.setAttribute('data-to', parsed.toId);
+        midNodeGroup.setAttribute('data-cx', String(midPt.x));
+        midNodeGroup.setAttribute('data-cy', String(midPt.y));
+        midNodeGroup.setAttribute('data-anchor-x', String(startPt.x));
+        midNodeGroup.setAttribute('data-anchor-y', String(startPt.y));
+        midNodeGroup.setAttribute(
+          'data-testid',
+          `edge-midpoint-node-${parsed.fromId}-${parsed.toId}`
+        );
 
-      const b64Points = pathEl.getAttribute('data-points');
-      if (b64Points) {
-        try {
-          const pts = JSON.parse(atob(b64Points));
-          if (Array.isArray(pts) && pts.length >= 2) {
-            startPt = { x: Number(pts[0].x), y: Number(pts[0].y) };
-            endPt = {
-              x: Number(pts[pts.length - 1].x),
-              y: Number(pts[pts.length - 1].y),
-            };
-          }
-        } catch {
-          // Fallback to getPointAtLength
-        }
-      }
+        const midCircle = document.createElementNS(svgNs, 'circle');
+        midCircle.setAttribute('class', 'mc-edge-midpoint-circle');
+        midCircle.setAttribute('r', '9');
+        midCircle.setAttribute('cx', '0');
+        midCircle.setAttribute('cy', '0');
 
-      if (!startPt || !endPt) {
-        try {
-          const svgPath = pathEl as SVGPathElement;
-          const total = svgPath.getTotalLength();
-          const p0 = svgPath.getPointAtLength(0);
-          const p1 = svgPath.getPointAtLength(total);
-          startPt = { x: p0.x, y: p0.y };
-          endPt = { x: p1.x, y: p1.y };
-        } catch {
-          startPt = nodeCenters.get(parsed.fromId) || null;
-          endPt = nodeCenters.get(parsed.toId) || null;
-        }
-      }
+        const midPlusH = document.createElementNS(svgNs, 'line');
+        midPlusH.setAttribute('class', 'mc-edge-midpoint-plus');
+        midPlusH.setAttribute('x1', '-4');
+        midPlusH.setAttribute('y1', '0');
+        midPlusH.setAttribute('x2', '4');
+        midPlusH.setAttribute('y2', '0');
 
-      if (startPt && endPt) {
+        const midPlusV = document.createElementNS(svgNs, 'line');
+        midPlusV.setAttribute('class', 'mc-edge-midpoint-plus');
+        midPlusV.setAttribute('x1', '0');
+        midPlusV.setAttribute('y1', '-4');
+        midPlusV.setAttribute('x2', '0');
+        midPlusV.setAttribute('y2', '4');
+
+        const midTitle = document.createElementNS(svgNs, 'title');
+        midTitle.textContent = `Click to insert a node on (${parsed.fromId} → ${parsed.toId}), or drag to reconnect line`;
+        midNodeGroup.appendChild(midTitle);
+        midNodeGroup.appendChild(midCircle);
+        midNodeGroup.appendChild(midPlusH);
+        midNodeGroup.appendChild(midPlusV);
+        edgeGroup.appendChild(midNodeGroup);
+
         // Source handle (tail of arrow)
         const srcHandle = document.createElementNS(svgNs, 'circle');
         srcHandle.setAttribute('class', 'mc-edge-endpoint mc-edge-source-handle');
         srcHandle.setAttribute('cx', String(startPt.x));
         srcHandle.setAttribute('cy', String(startPt.y));
-        srcHandle.setAttribute('r', '5.5');
+        srcHandle.setAttribute('r', '6');
         srcHandle.setAttribute('data-edge-id', dataId);
         srcHandle.setAttribute('data-from', parsed.fromId);
         srcHandle.setAttribute('data-to', parsed.toId);
@@ -338,14 +424,14 @@ export const Preview: React.FC<PreviewProps> = ({
         const srcTitle = document.createElementNS(svgNs, 'title');
         srcTitle.textContent = `Drag to move connection start (${parsed.fromId} → ${parsed.toId}) to another node`;
         srcHandle.appendChild(srcTitle);
-        overlayLayer.appendChild(srcHandle);
+        edgeGroup.appendChild(srcHandle);
 
-        // Target handle (arrowhead end)
+        // Target handle (point at the end of the line)
         const tgtHandle = document.createElementNS(svgNs, 'circle');
         tgtHandle.setAttribute('class', 'mc-edge-endpoint mc-edge-target-handle');
         tgtHandle.setAttribute('cx', String(endPt.x));
         tgtHandle.setAttribute('cy', String(endPt.y));
-        tgtHandle.setAttribute('r', '6.5');
+        tgtHandle.setAttribute('r', '7.5');
         tgtHandle.setAttribute('data-edge-id', dataId);
         tgtHandle.setAttribute('data-from', parsed.fromId);
         tgtHandle.setAttribute('data-to', parsed.toId);
@@ -357,10 +443,12 @@ export const Preview: React.FC<PreviewProps> = ({
           `edge-handle-target-${parsed.fromId}-${parsed.toId}`
         );
         const tgtTitle = document.createElementNS(svgNs, 'title');
-        tgtTitle.textContent = `Drag arrowhead (${parsed.fromId} → ${parsed.toId}) to reconnect to another node`;
+        tgtTitle.textContent = `Drag end point (${parsed.fromId} → ${parsed.toId}) to reconnect to another node`;
         tgtHandle.appendChild(tgtTitle);
-        overlayLayer.appendChild(tgtHandle);
+        edgeGroup.appendChild(tgtHandle);
       }
+
+      overlayLayer.appendChild(edgeGroup);
     }
 
     // Rubber-band line element for active connection dragging
@@ -372,13 +460,17 @@ export const Preview: React.FC<PreviewProps> = ({
     svgEl.appendChild(overlayLayer);
   }, [svg, onChangeCode]);
 
-  // Keep SVG visual selection state (.mc-selected-node / .mc-linking-source) synced with selectedEl
+  // Keep SVG visual selection state (.mc-selected-node / .mc-selected-edge / .mc-linking-source) synced with selectedEl
   useEffect(() => {
     const svgEl = stageRef.current?.querySelector('svg');
     if (!svgEl) return;
-    svgEl.querySelectorAll('g.node.mc-selected-node, g.node.mc-linking-source').forEach((el) => {
-      el.classList.remove('mc-selected-node', 'mc-linking-source');
-    });
+    svgEl
+      .querySelectorAll(
+        'g.node.mc-selected-node, g.node.mc-linking-source, g.mc-edge-group.mc-selected-edge'
+      )
+      .forEach((el) => {
+        el.classList.remove('mc-selected-node', 'mc-linking-source', 'mc-selected-edge');
+      });
 
     if (selectedEl?.kind === 'node' && selectedEl.nodeId) {
       const selNode = svgEl.querySelector(
@@ -391,6 +483,15 @@ export const Preview: React.FC<PreviewProps> = ({
       const otherNodes = knownNodes.filter((n) => n !== selectedEl.nodeId);
       if (otherNodes.length > 0 && (!connectTargetNodeId || connectTargetNodeId === selectedEl.nodeId)) {
         setConnectTargetNodeId(otherNodes[0]);
+      }
+    }
+
+    if (selectedEl?.kind === 'edge' && selectedEl.fromId && selectedEl.toId) {
+      const selEdgeGroup = svgEl.querySelector(
+        `g.mc-edge-group[data-from="${CSS.escape(selectedEl.fromId)}"][data-to="${CSS.escape(selectedEl.toId)}"]`
+      );
+      if (selEdgeGroup) {
+        selEdgeGroup.classList.add('mc-selected-edge');
       }
     }
 
@@ -518,33 +619,87 @@ export const Preview: React.FC<PreviewProps> = ({
 
     const svgEl = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
 
-    // 1. Check if user grabbed an existing edge endpoint handle to reconnect it
+    // 1. Check if user grabbed an existing edge endpoint handle, interactive midpoint node, or the connection line itself
     const endpointHandle = target.closest('.mc-edge-endpoint');
-    if (endpointHandle && svgEl && onChangeCode) {
-      e.stopPropagation();
-      const fromId = endpointHandle.getAttribute('data-from') || '';
-      const toId = endpointHandle.getAttribute('data-to') || '';
-      const endType = endpointHandle.getAttribute('data-end');
-      const anchorX = parseFloat(endpointHandle.getAttribute('data-anchor-x') || '0');
-      const anchorY = parseFloat(endpointHandle.getAttribute('data-anchor-y') || '0');
-      const handleX = parseFloat(endpointHandle.getAttribute('cx') || '0');
-      const handleY = parseFloat(endpointHandle.getAttribute('cy') || '0');
+    const midpointNode = target.closest('.mc-edge-midpoint-node');
+    const edgeHitPath = target.closest('.mc-edge-hit');
 
-      const dragState: ConnectionDragState = {
-        mode: endType === 'source' ? 'reconnect-source' : 'reconnect-target',
-        fromNodeId: fromId,
-        toNodeId: toId,
-        anchorX,
-        anchorY,
-        currentX: handleX,
-        currentY: handleY,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        hoveredNodeId: null,
-      };
-      connDragRef.current = dragState;
-      updateRubberBandDom(dragState);
-      return;
+    if ((endpointHandle || midpointNode || edgeHitPath) && svgEl && onChangeCode) {
+      e.stopPropagation();
+
+      if (endpointHandle) {
+        const fromId = endpointHandle.getAttribute('data-from') || '';
+        const toId = endpointHandle.getAttribute('data-to') || '';
+        const endType = endpointHandle.getAttribute('data-end');
+        const anchorX = parseFloat(endpointHandle.getAttribute('data-anchor-x') || '0');
+        const anchorY = parseFloat(endpointHandle.getAttribute('data-anchor-y') || '0');
+        const handleX = parseFloat(endpointHandle.getAttribute('cx') || '0');
+        const handleY = parseFloat(endpointHandle.getAttribute('cy') || '0');
+
+        const dragState: ConnectionDragState = {
+          mode: endType === 'source' ? 'reconnect-source' : 'reconnect-target',
+          fromNodeId: fromId,
+          toNodeId: toId,
+          anchorX,
+          anchorY,
+          currentX: handleX,
+          currentY: handleY,
+          startClientX: e.clientX,
+          startClientY: e.clientY,
+          hoveredNodeId: null,
+        };
+        connDragRef.current = dragState;
+        updateRubberBandDom(dragState);
+        return;
+      }
+
+      if (midpointNode) {
+        const fromId = midpointNode.getAttribute('data-from') || '';
+        const toId = midpointNode.getAttribute('data-to') || '';
+        const anchorX = parseFloat(midpointNode.getAttribute('data-anchor-x') || '0');
+        const anchorY = parseFloat(midpointNode.getAttribute('data-anchor-y') || '0');
+        const cx = parseFloat(midpointNode.getAttribute('data-cx') || '0');
+        const cy = parseFloat(midpointNode.getAttribute('data-cy') || '0');
+
+        const dragState: ConnectionDragState = {
+          mode: 'reconnect-target',
+          fromNodeId: fromId,
+          toNodeId: toId,
+          anchorX,
+          anchorY,
+          currentX: cx,
+          currentY: cy,
+          startClientX: e.clientX,
+          startClientY: e.clientY,
+          hoveredNodeId: null,
+          clickedMidpointNode: true,
+        };
+        connDragRef.current = dragState;
+        return;
+      }
+
+      if (edgeHitPath) {
+        const fromId = edgeHitPath.getAttribute('data-from') || '';
+        const toId = edgeHitPath.getAttribute('data-to') || '';
+        const startX = parseFloat(edgeHitPath.getAttribute('data-start-x') || '0');
+        const startY = parseFloat(edgeHitPath.getAttribute('data-start-y') || '0');
+        const pt = clientToSvgCoords(svgEl, e.clientX, e.clientY);
+
+        const dragState: ConnectionDragState = {
+          mode: 'reconnect-target',
+          fromNodeId: fromId,
+          toNodeId: toId,
+          anchorX: startX,
+          anchorY: startY,
+          currentX: pt.x,
+          currentY: pt.y,
+          startClientX: e.clientX,
+          startClientY: e.clientY,
+          hoveredNodeId: null,
+        };
+        connDragRef.current = dragState;
+        return;
+      }
     }
 
     // 2. Check if user grabbed a node connection port handle OR is in Connect Mode / holding Shift on a node
@@ -602,7 +757,14 @@ export const Preview: React.FC<PreviewProps> = ({
       activeConnDrag.currentX = pt.x;
       activeConnDrag.currentY = pt.y;
       activeConnDrag.hoveredNodeId = hovered;
-      updateRubberBandDom(activeConnDrag);
+
+      const clientDist = Math.hypot(
+        e.clientX - activeConnDrag.startClientX,
+        e.clientY - activeConnDrag.startClientY
+      );
+      if (clientDist >= 4 || activeConnDrag.mode === 'new-connection') {
+        updateRubberBandDom(activeConnDrag);
+      }
       return;
     }
 
@@ -655,12 +817,35 @@ export const Preview: React.FC<PreviewProps> = ({
       }
     } else if (
       !target.closest(
-        'g.node, g.actor, g.edgeLabel, g.cluster, path[data-edge="true"], .mc-edge-hit'
+        'g.node, g.actor, g.edgeLabel, g.cluster, path[data-edge="true"], .mc-edge-hit, .mc-edge-group'
       )
     ) {
       setSelectedEl(null);
       setLinkingFromNodeId(null);
     }
+  };
+
+  const handleInsertNodeOnSelectedEdge = (fromIdOverride?: string, toIdOverride?: string) => {
+    const fId = fromIdOverride || (selectedEl?.kind === 'edge' ? selectedEl.fromId : '');
+    const tId = toIdOverride || (selectedEl?.kind === 'edge' ? selectedEl.toId : '');
+    if (!fId || !tId || !onChangeCode) return;
+
+    const { code: nextCode, newNodeId } = insertNodeOnEdgeInCode(
+      code,
+      fId,
+      tId,
+      'New Step',
+      'rect'
+    );
+    onChangeCode(nextCode);
+    setSelectedEl({
+      kind: 'node',
+      nodeId: newNodeId,
+      label: 'New Step',
+      shape: 'rect',
+    });
+    setEditLabel('New Step');
+    setEditShape('rect');
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -727,6 +912,30 @@ export const Preview: React.FC<PreviewProps> = ({
         return;
       }
 
+      // If user clicked (without dragging) on the midpoint interactive node on a connection line:
+      // insert a new node onto that connection line!
+      if (
+        activeConnDrag.clickedMidpointNode &&
+        clientDist < 6 &&
+        activeConnDrag.fromNodeId &&
+        activeConnDrag.toNodeId
+      ) {
+        handleInsertNodeOnSelectedEdge(activeConnDrag.fromNodeId, activeConnDrag.toNodeId);
+        return;
+      }
+
+      // If user clicked (without dragging) on a connection line or its endpoint:
+      // select the connection line so the point at the end of the line is shown!
+      if (
+        clientDist < 6 &&
+        (!dropNodeId ||
+          (activeConnDrag.mode === 'reconnect-target' && dropNodeId === activeConnDrag.toNodeId) ||
+          (activeConnDrag.mode === 'reconnect-source' && dropNodeId === activeConnDrag.fromNodeId))
+      ) {
+        selectOrLinkClickedElement(e.target as Element);
+        return;
+      }
+
       if (
         activeConnDrag.mode === 'reconnect-target' &&
         activeConnDrag.toNodeId &&
@@ -741,6 +950,15 @@ export const Preview: React.FC<PreviewProps> = ({
           dropNodeId
         );
         onChangeCode(nextCode);
+        setSelectedEl({
+          kind: 'edge',
+          nodeId: `L_${activeConnDrag.fromNodeId}_${dropNodeId}_0`,
+          fromId: activeConnDrag.fromNodeId,
+          toId: dropNodeId,
+          label: '',
+          edgeType: '-->',
+          shape: 'rect',
+        });
         return;
       }
 
@@ -758,9 +976,20 @@ export const Preview: React.FC<PreviewProps> = ({
           activeConnDrag.toNodeId
         );
         onChangeCode(nextCode);
+        setSelectedEl({
+          kind: 'edge',
+          nodeId: `L_${dropNodeId}_${activeConnDrag.toNodeId}_0`,
+          fromId: dropNodeId,
+          toId: activeConnDrag.toNodeId,
+          label: '',
+          edgeType: '-->',
+          shape: 'rect',
+        });
         return;
       }
 
+      // Fallback: if released without dropping on a new node, keep the line selected
+      selectOrLinkClickedElement(e.target as Element);
       return;
     }
 
@@ -1146,6 +1375,38 @@ export const Preview: React.FC<PreviewProps> = ({
           </div>
         )}
 
+        {selectedEl?.kind === 'edge' && selectedEl.fromId && selectedEl.toId && onChangeCode && (
+          <div
+            className="floating-selection-bar"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="floating-edge-selection-bar"
+          >
+            <span className="floating-selection-badge">
+              Line <strong>{selectedEl.fromId} → {selectedEl.toId}</strong> (drag end point or line to move)
+            </span>
+            <button
+              type="button"
+              className="btn btn-xs btn-primary"
+              onClick={() => handleInsertNodeOnSelectedEdge()}
+              title="Insert a new node in the middle of this connection line"
+              data-testid="floating-insert-node-on-edge-btn"
+            >
+              <Plus size={13} />
+              <span>Insert Node on Line</span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-xs btn-danger-outline"
+              onClick={handleDeleteSelectedEdge}
+              title="Delete this connection line"
+              data-testid="floating-delete-edge-btn"
+            >
+              <Trash2 size={13} />
+              <span>Delete Line</span>
+            </button>
+          </div>
+        )}
+
         {selectedEl && onChangeCode && (
           <div
             className="visual-node-editor"
@@ -1255,7 +1516,17 @@ export const Preview: React.FC<PreviewProps> = ({
                   </div>
                 </div>
 
-                <div className="visual-editor-footer" style={{ justifyContent: 'space-between' }}>
+                <div className="visual-editor-footer" style={{ justifyContent: 'space-between', gap: '6px' }}>
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-primary"
+                    onClick={() => handleInsertNodeOnSelectedEdge()}
+                    title="Insert a new node on this connection line"
+                    data-testid="inspector-insert-node-on-edge-btn"
+                  >
+                    <Plus size={13} />
+                    <span>Insert Node</span>
+                  </button>
                   <button
                     type="button"
                     className="btn btn-xs btn-secondary"
@@ -1277,7 +1548,7 @@ export const Preview: React.FC<PreviewProps> = ({
                     data-testid="visual-delete-edge-btn"
                   >
                     <Trash2 size={13} />
-                    <span>Delete Connection</span>
+                    <span>Delete</span>
                   </button>
                 </div>
               </>

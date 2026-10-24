@@ -250,16 +250,23 @@ export function extractSvgElementInfo(
   knownNodeIds: string[] = []
 ): SelectedDiagramElement | null {
   // Check if user clicked an edge path or custom edge handle
-  const edgePath = target.closest('path[data-edge="true"], .mc-edge-hit, .mc-edge-endpoint');
+  const edgePath = target.closest(
+    'path[data-edge="true"], .mc-edge-hit, .mc-edge-endpoint, .mc-edge-group'
+  );
   if (edgePath) {
     const dataId =
       edgePath.getAttribute('data-edge-id') || edgePath.getAttribute('data-id') || '';
-    const parsedIds = parseEdgeDataId(dataId, knownNodeIds);
+    const directFrom = edgePath.getAttribute('data-from') || '';
+    const directTo = edgePath.getAttribute('data-to') || '';
+    const parsedIds =
+      directFrom && directTo
+        ? { fromId: directFrom, toId: directTo, index: 0 }
+        : parseEdgeDataId(dataId, knownNodeIds);
     if (parsedIds) {
       const edgeLine = findEdgeInCode(code, parsedIds.fromId, parsedIds.toId);
       return {
         kind: 'edge',
-        nodeId: dataId,
+        nodeId: dataId || `L_${parsedIds.fromId}_${parsedIds.toId}_0`,
         fromId: parsedIds.fromId,
         toId: parsedIds.toId,
         label: edgeLine?.label || '',
@@ -439,6 +446,39 @@ export function deleteEdgeInCode(code: string, fromId: string, toId: string): st
     }
   }
   return code;
+}
+
+export function insertNodeOnEdgeInCode(
+  code: string,
+  fromId: string,
+  toId: string,
+  label = 'New Step',
+  shape: NodeShape = 'rect'
+): { code: string; newNodeId: string } {
+  const newNodeId = generateNextNodeId(code, 'N');
+  const wrappedNew = wrapNodeShape(label.trim() || 'New Step', shape);
+  const lines = code.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const parsed = parseEdgeLine(lines[i], i);
+    if (parsed && parsed.fromId === fromId && parsed.toId === toId) {
+      const firstArrow = formatEdgeArrow(parsed.arrowType, parsed.label);
+      const line1 = `${parsed.indent}${parsed.fromId}${parsed.fromShape} ${firstArrow} ${newNodeId}${wrappedNew}`;
+      const line2 = `${parsed.indent}${newNodeId} ${parsed.arrowType} ${parsed.toId}${parsed.toShape}`;
+      lines.splice(i, 1, line1, line2);
+      return {
+        code: lines.join('\n'),
+        newNodeId,
+      };
+    }
+  }
+
+  // Fallback if edge wasn't matched as single line
+  const trimmed = code.replace(/\s+$/, '');
+  return {
+    code: `${trimmed}\n    ${fromId} --> ${newNodeId}${wrappedNew}\n    ${newNodeId} --> ${toId}\n`,
+    newNodeId,
+  };
 }
 
 export function updateNodeInCode(

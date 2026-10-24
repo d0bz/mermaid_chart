@@ -1464,25 +1464,81 @@ code {
   r: 8px;
 }
 
+.mc-edge-highlight {
+  fill: none;
+  stroke: #6366f1;
+  stroke-width: 3.5px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease, stroke 0.14s ease;
+}
+
+.mc-edge-group:hover .mc-edge-highlight {
+  opacity: 0.65;
+}
+
+.mc-edge-group.mc-selected-edge .mc-edge-highlight {
+  opacity: 0.95;
+  stroke: #818cf8;
+  stroke-width: 4px;
+}
+
 .mc-edge-hit {
   fill: none;
   stroke: transparent;
-  stroke-width: 14px;
-  cursor: pointer;
+  stroke-width: 18px;
+  cursor: grab;
 }
 
-.mc-edge-hit:hover {
-  stroke: rgba(99, 102, 241, 0.22);
+.mc-edge-hit:active {
+  cursor: grabbing;
+}
+
+.mc-edge-midpoint-node {
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.14s ease;
+}
+
+.mc-edge-group:hover .mc-edge-midpoint-node,
+.mc-edge-group.mc-selected-edge .mc-edge-midpoint-node {
+  opacity: 1;
+}
+
+.mc-edge-midpoint-circle {
+  fill: #4f46e5;
+  stroke: #ffffff;
+  stroke-width: 2px;
+  transition: r 0.12s ease, fill 0.12s ease;
+}
+
+.mc-edge-midpoint-node:hover .mc-edge-midpoint-circle {
+  fill: #10b981;
+  r: 11px;
+}
+
+.mc-edge-midpoint-plus {
+  stroke: #ffffff;
+  stroke-width: 2px;
+  stroke-linecap: round;
+  pointer-events: none;
 }
 
 .mc-edge-endpoint {
   cursor: grab;
-  opacity: 0.35;
+  opacity: 0;
+  pointer-events: none;
   transition: opacity 0.14s ease, r 0.12s ease, fill 0.12s ease;
 }
 
-.preview-canvas:hover .mc-edge-endpoint {
-  opacity: 0.85;
+.mc-edge-group:hover .mc-edge-endpoint {
+  opacity: 0.8;
+  pointer-events: all;
+}
+
+.mc-edge-group.mc-selected-edge .mc-edge-endpoint {
+  opacity: 1 !important;
+  pointer-events: all;
 }
 
 .mc-edge-source-handle {
@@ -1497,11 +1553,20 @@ code {
   stroke-width: 2px;
 }
 
-.mc-edge-endpoint:hover {
-  opacity: 1 !important;
+.mc-edge-group.mc-selected-edge .mc-edge-target-handle {
   fill: #f59e0b;
   stroke: #ffffff;
+  stroke-width: 2.5px;
   r: 8.5px;
+  filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.9));
+}
+
+.mc-edge-endpoint:hover {
+  opacity: 1 !important;
+  pointer-events: all;
+  fill: #f59e0b;
+  stroke: #ffffff;
+  r: 9px;
 }
 
 .mc-rubberband-line {
