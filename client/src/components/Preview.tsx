@@ -20,6 +20,8 @@ import {
   Copy,
   ClipboardPaste,
   Pencil,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 import { renderMermaidSvg, type MermaidTheme } from '../mermaidRenderer';
 import {
@@ -82,6 +84,9 @@ interface InlineBoxEditState {
   width: number;
   height: number;
 }
+
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 6;
 
 function clientToSvgCoords(
   svgEl: SVGSVGElement,
@@ -193,6 +198,7 @@ export const Preview: React.FC<PreviewProps> = ({
   });
   const [justCopied, setJustCopied] = useState<boolean>(false);
   const [inlineEdit, setInlineEdit] = useState<InlineBoxEditState | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
   const dragStartRef = useRef<{
     x: number;
@@ -202,6 +208,8 @@ export const Preview: React.FC<PreviewProps> = ({
     moved: boolean;
   } | null>(null);
   const connDragRef = useRef<ConnectionDragState | null>(null);
+  const previewPaneRef = useRef<HTMLDivElement | null>(null);
+  const enteredNativeFullscreenRef = useRef<boolean>(false);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const labelInputRef = useRef<HTMLInputElement | null>(null);
@@ -662,14 +670,61 @@ export const Preview: React.FC<PreviewProps> = ({
     return () => clearTimeout(timer);
   }, [inlineEdit?.nodeId]);
 
-  // Keep inline box editor position synced when zooming or panning
+  // Keep inline box editor position synced when zooming, panning, or toggling fullscreen
   useEffect(() => {
     if (!inlineEdit?.nodeId) return;
     const rect = computeNodeOverlayRect(inlineEdit.nodeId);
     if (rect) {
       setInlineEdit((prev) => (prev ? { ...prev, ...rect } : null));
     }
-  }, [scale, pan, svg]);
+  }, [scale, pan, svg, isFullscreen]);
+
+  const handleToggleFullscreen = () => {
+    if (isFullscreen) {
+      setIsFullscreen(false);
+      enteredNativeFullscreenRef.current = false;
+      if (typeof document !== 'undefined' && document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
+    } else {
+      setIsFullscreen(true);
+      const el = previewPaneRef.current;
+      if (
+        el &&
+        typeof el.requestFullscreen === 'function' &&
+        typeof document !== 'undefined' &&
+        !document.fullscreenElement
+      ) {
+        el.requestFullscreen()
+          .then(() => {
+            enteredNativeFullscreenRef.current = true;
+          })
+          .catch(() => {
+            enteredNativeFullscreenRef.current = false;
+          });
+      }
+    }
+  };
+
+  // Sync with browser native Fullscreen API changes (e.g. pressing Esc in OS fullscreen)
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement && enteredNativeFullscreenRef.current) {
+        enteredNativeFullscreenRef.current = false;
+        setIsFullscreen(false);
+      } else if (
+        previewPaneRef.current &&
+        document.fullscreenElement === previewPaneRef.current
+      ) {
+        enteredNativeFullscreenRef.current = true;
+        setIsFullscreen(true);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+    };
+  }, []);
 
   const handleCopySelectedNode = () => {
     if (!selectedEl || selectedEl.kind !== 'node') return;
@@ -704,10 +759,8 @@ export const Preview: React.FC<PreviewProps> = ({
     setEditShape(copiedNode.shape);
   };
 
-  // Keyboard shortcuts: Copy (Ctrl/Cmd+C or 'c'), Paste (Ctrl/Cmd+V or 'v'), Enter/F2 to edit text, Delete / Backspace, Escape
+  // Keyboard shortcuts: Fullscreen ('f'), Copy (Ctrl/Cmd+C or 'c'), Paste (Ctrl/Cmd+V or 'v'), Enter/F2 to edit text, Delete / Backspace, Escape
   useEffect(() => {
-    if (!onChangeCode) return;
-
     const onKeyDown = (e: KeyboardEvent) => {
       const active = document.activeElement as HTMLElement | null;
       if (
@@ -724,6 +777,25 @@ export const Preview: React.FC<PreviewProps> = ({
       const keyLower = e.key.toLowerCase();
       const isMod = e.ctrlKey || e.metaKey;
       const hasTextSelection = Boolean(window.getSelection()?.toString().trim());
+
+      // Toggle fullscreen mode with 'f'
+      if (!isMod && !e.altKey && !e.shiftKey && keyLower === 'f') {
+        e.preventDefault();
+        handleToggleFullscreen();
+        return;
+      }
+
+      if (!onChangeCode) {
+        if (e.key === 'Escape' && isFullscreen) {
+          e.preventDefault();
+          setIsFullscreen(false);
+          enteredNativeFullscreenRef.current = false;
+          if (document.fullscreenElement) {
+            document.exitFullscreen().catch(() => {});
+          }
+        }
+        return;
+      }
 
       // Copy selected box: Ctrl+C / Cmd+C or pressing 'c' when a node is selected
       if (
@@ -746,7 +818,17 @@ export const Preview: React.FC<PreviewProps> = ({
         return;
       }
 
-      if (!selectedEl) return;
+      if (!selectedEl) {
+        if (e.key === 'Escape' && isFullscreen) {
+          e.preventDefault();
+          setIsFullscreen(false);
+          enteredNativeFullscreenRef.current = false;
+          if (document.fullscreenElement) {
+            document.exitFullscreen().catch(() => {});
+          }
+        }
+        return;
+      }
 
       // Press Enter or F2 when a box is selected to edit its text directly on the box
       if (selectedEl.kind === 'node' && (e.key === 'Enter' || e.key === 'F2')) {
@@ -786,9 +868,9 @@ export const Preview: React.FC<PreviewProps> = ({
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [selectedEl, copiedNode, inlineEdit, linkingFromNodeId, code, onChangeCode]);
+  }, [selectedEl, copiedNode, inlineEdit, linkingFromNodeId, isFullscreen, code, onChangeCode]);
 
-  // Mouse wheel zooms in and out directly
+  // Mouse wheel zooms in and out directly (25% to 600%)
   useEffect(() => {
     const el = canvasRef.current;
     if (!el) return;
@@ -797,7 +879,7 @@ export const Preview: React.FC<PreviewProps> = ({
       e.preventDefault();
       if (e.deltaY === 0) return;
       const delta = e.deltaY < 0 ? 0.12 : -0.12;
-      setScale((s) => Math.min(4, Math.max(0.25, +(s + delta).toFixed(2))));
+      setScale((s) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, +(s + delta).toFixed(2))));
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });
@@ -842,8 +924,8 @@ export const Preview: React.FC<PreviewProps> = ({
     }
   };
 
-  const handleZoomIn = () => setScale((s) => Math.min(4, +(s + 0.2).toFixed(2)));
-  const handleZoomOut = () => setScale((s) => Math.max(0.25, +(s - 0.2).toFixed(2)));
+  const handleZoomIn = () => setScale((s) => Math.min(MAX_ZOOM, +(s + 0.2).toFixed(2)));
+  const handleZoomOut = () => setScale((s) => Math.max(MIN_ZOOM, +(s - 0.2).toFixed(2)));
   const handleResetView = () => {
     setScale(1);
     setPan({ x: 0, y: 0 });
@@ -1476,9 +1558,11 @@ export const Preview: React.FC<PreviewProps> = ({
 
   return (
     <div
+      ref={previewPaneRef}
       className={`preview-pane ${theme === 'dark' ? 'preview-dark' : 'preview-light'} ${
         connectMode ? 'connect-mode-active' : ''
-      }`}
+      } ${isFullscreen ? 'preview-fullscreen' : ''}`}
+      data-testid="preview-pane"
     >
       <div className="preview-toolbar">
         <div className="preview-toolbar-group">
@@ -1486,20 +1570,27 @@ export const Preview: React.FC<PreviewProps> = ({
             type="button"
             className="icon-btn"
             onClick={handleZoomOut}
-            title="Zoom out"
+            title="Zoom out (min 25%)"
             aria-label="Zoom out"
+            data-testid="zoom-out-btn"
           >
             <ZoomOut size={15} />
           </button>
-          <span className="zoom-readout" onClick={handleResetView} title="Click to reset zoom">
+          <span
+            className="zoom-readout"
+            onClick={handleResetView}
+            title="Click to reset zoom (100%)"
+            data-testid="zoom-readout"
+          >
             {Math.round(scale * 100)}%
           </span>
           <button
             type="button"
             className="icon-btn"
             onClick={handleZoomIn}
-            title="Zoom in"
+            title="Zoom in (max 600%)"
             aria-label="Zoom in"
+            data-testid="zoom-in-btn"
           >
             <ZoomIn size={15} />
           </button>
@@ -1511,6 +1602,17 @@ export const Preview: React.FC<PreviewProps> = ({
             aria-label="Reset zoom and pan"
           >
             <RotateCcw size={15} />
+          </button>
+          <button
+            type="button"
+            className={`btn btn-xs ${isFullscreen ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={handleToggleFullscreen}
+            title={isFullscreen ? 'Exit fullscreen (Esc or F)' : 'View chart in fullscreen (F)'}
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+            data-testid="preview-fullscreen-btn"
+          >
+            {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+            <span>{isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}</span>
           </button>
 
           {onChangeCode && (

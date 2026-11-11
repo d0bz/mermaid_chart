@@ -933,6 +933,16 @@ code {
   position: relative;
 }
 
+.preview-pane.preview-fullscreen,
+.preview-pane:fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 9999;
+  background: var(--bg-app);
+}
+
 .preview-light .preview-canvas {
   background-color: #f8fafc;
   background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
