@@ -1029,6 +1029,10 @@ code {
   padding: 24px;
 }
 
+.preview-canvas.dragging .preview-svg-stage {
+  transition: none;
+}
+
 .preview-empty {
   color: #64748b;
   font-size: 14px;

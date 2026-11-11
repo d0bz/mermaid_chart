@@ -208,6 +208,11 @@ export const Preview: React.FC<PreviewProps> = ({
     moved: boolean;
   } | null>(null);
   const connDragRef = useRef<ConnectionDragState | null>(null);
+  const viewRef = useRef<{ scale: number; pan: { x: number; y: number } }>({
+    scale: 1,
+    pan: { x: 0, y: 0 },
+  });
+  viewRef.current = { scale, pan };
   const previewPaneRef = useRef<HTMLDivElement | null>(null);
   const enteredNativeFullscreenRef = useRef<boolean>(false);
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -870,7 +875,45 @@ export const Preview: React.FC<PreviewProps> = ({
     };
   }, [selectedEl, copiedNode, inlineEdit, linkingFromNodeId, isFullscreen, code, onChangeCode]);
 
-  // Mouse wheel zooms in and out directly (25% to 1000%)
+  const zoomAtClientPoint = (
+    nextScaleRaw: number,
+    clientX?: number,
+    clientY?: number
+  ) => {
+    const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, +nextScaleRaw.toFixed(2)));
+    const { scale: curScale, pan: curPan } = viewRef.current;
+    if (clamped === curScale) return;
+
+    const canvasEl = canvasRef.current;
+    const stageEl = stageRef.current;
+    if (!canvasEl || !stageEl) {
+      viewRef.current = { scale: clamped, pan: curPan };
+      setScale(clamped);
+      return;
+    }
+
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const focalX = clientX ?? canvasRect.left + canvasRect.width / 2;
+    const focalY = clientY ?? canvasRect.top + canvasRect.height / 2;
+
+    const originX = canvasRect.left + stageEl.offsetLeft + stageEl.offsetWidth / 2;
+    const originY = canvasRect.top + stageEl.offsetTop + stageEl.offsetHeight / 2;
+
+    const dx = focalX - (originX + curPan.x);
+    const dy = focalY - (originY + curPan.y);
+    const ratio = clamped / curScale;
+
+    const nextPan = {
+      x: curPan.x - dx * (ratio - 1),
+      y: curPan.y - dy * (ratio - 1),
+    };
+
+    viewRef.current = { scale: clamped, pan: nextPan };
+    setScale(clamped);
+    setPan(nextPan);
+  };
+
+  // Mouse wheel zooms in and out anchored at the pointer position (25% to 1000%)
   useEffect(() => {
     const el = canvasRef.current;
     if (!el) return;
@@ -878,10 +921,9 @@ export const Preview: React.FC<PreviewProps> = ({
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       if (e.deltaY === 0) return;
-      setScale((s) => {
-        const step = e.deltaY < 0 ? (s >= 3 ? 0.25 : 0.12) : -(s > 3 ? 0.25 : 0.12);
-        return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, +(s + step).toFixed(2)));
-      });
+      const curScale = viewRef.current.scale;
+      const step = e.deltaY < 0 ? (curScale >= 3 ? 0.25 : 0.12) : -(curScale > 3 ? 0.25 : 0.12);
+      zoomAtClientPoint(curScale + step, e.clientX, e.clientY);
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });
@@ -926,11 +968,16 @@ export const Preview: React.FC<PreviewProps> = ({
     }
   };
 
-  const handleZoomIn = () =>
-    setScale((s) => Math.min(MAX_ZOOM, +(s + (s >= 3 ? 0.5 : 0.2)).toFixed(2)));
-  const handleZoomOut = () =>
-    setScale((s) => Math.max(MIN_ZOOM, +(s - (s > 3 ? 0.5 : 0.2)).toFixed(2)));
+  const handleZoomIn = () => {
+    const curScale = viewRef.current.scale;
+    zoomAtClientPoint(curScale + (curScale >= 3 ? 0.5 : 0.2));
+  };
+  const handleZoomOut = () => {
+    const curScale = viewRef.current.scale;
+    zoomAtClientPoint(curScale - (curScale > 3 ? 0.5 : 0.2));
+  };
   const handleResetView = () => {
+    viewRef.current = { scale: 1, pan: { x: 0, y: 0 } };
     setScale(1);
     setPan({ x: 0, y: 0 });
   };
@@ -1097,10 +1144,12 @@ export const Preview: React.FC<PreviewProps> = ({
     if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
       dragStartRef.current.moved = true;
     }
-    setPan({
+    const nextPan = {
       x: dragStartRef.current.panX + dx,
       y: dragStartRef.current.panY + dy,
-    });
+    };
+    viewRef.current = { scale: viewRef.current.scale, pan: nextPan };
+    setPan(nextPan);
   };
 
   const selectOrLinkClickedElement = (target: Element) => {
