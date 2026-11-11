@@ -86,7 +86,7 @@ interface InlineBoxEditState {
 }
 
 const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 6;
+const MAX_ZOOM = 10;
 
 function clientToSvgCoords(
   svgEl: SVGSVGElement,
@@ -870,7 +870,7 @@ export const Preview: React.FC<PreviewProps> = ({
     };
   }, [selectedEl, copiedNode, inlineEdit, linkingFromNodeId, isFullscreen, code, onChangeCode]);
 
-  // Mouse wheel zooms in and out directly (25% to 600%)
+  // Mouse wheel zooms in and out directly (25% to 1000%)
   useEffect(() => {
     const el = canvasRef.current;
     if (!el) return;
@@ -878,8 +878,10 @@ export const Preview: React.FC<PreviewProps> = ({
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       if (e.deltaY === 0) return;
-      const delta = e.deltaY < 0 ? 0.12 : -0.12;
-      setScale((s) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, +(s + delta).toFixed(2))));
+      setScale((s) => {
+        const step = e.deltaY < 0 ? (s >= 3 ? 0.25 : 0.12) : -(s > 3 ? 0.25 : 0.12);
+        return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, +(s + step).toFixed(2)));
+      });
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });
@@ -924,8 +926,10 @@ export const Preview: React.FC<PreviewProps> = ({
     }
   };
 
-  const handleZoomIn = () => setScale((s) => Math.min(MAX_ZOOM, +(s + 0.2).toFixed(2)));
-  const handleZoomOut = () => setScale((s) => Math.max(MIN_ZOOM, +(s - 0.2).toFixed(2)));
+  const handleZoomIn = () =>
+    setScale((s) => Math.min(MAX_ZOOM, +(s + (s >= 3 ? 0.5 : 0.2)).toFixed(2)));
+  const handleZoomOut = () =>
+    setScale((s) => Math.max(MIN_ZOOM, +(s - (s > 3 ? 0.5 : 0.2)).toFixed(2)));
   const handleResetView = () => {
     setScale(1);
     setPan({ x: 0, y: 0 });
@@ -1588,7 +1592,7 @@ export const Preview: React.FC<PreviewProps> = ({
             type="button"
             className="icon-btn"
             onClick={handleZoomIn}
-            title="Zoom in (max 600%)"
+            title="Zoom in (max 1000%)"
             aria-label="Zoom in"
             data-testid="zoom-in-btn"
           >
